@@ -1,0 +1,23 @@
+node_modules/
+.env
+logs/
+*.log
+
+# Prisma
+prisma/migrations/
+
+# Firebase credentials
+firebase-credentials.json
+
+# Python
+classify/__pycache__/
+classify/.venv/
+classify/model/
+*.py[cod]
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.dockerignore

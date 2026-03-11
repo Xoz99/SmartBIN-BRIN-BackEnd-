@@ -1,0 +1,118 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// Bin — represents a physical smart bin
+// ─────────────────────────────────────────────
+model Bin {
+  id        String   @id @default(cuid())
+  nodeId    String   @unique          // ESP32 node identifier (e.g. "bin-001")
+  location  String                   // Human readable location name
+  lat       Float                    // GPS latitude
+  lng       Float                    // GPS longitude
+  createdAt DateTime @default(now())
+
+  // Relationships
+  areaId    String?                  // Optional initially to not break existing data immediately
+  area      Area?                    @relation(fields: [areaId], references: [id])
+
+  sensorLogs SensorLog[]
+  alerts     Alert[]
+
+  @@map("bins")
+}
+
+// ─────────────────────────────────────────────
+// SensorLog — time-series data from sensors
+// ─────────────────────────────────────────────
+model SensorLog {
+  id        String   @id @default(cuid())
+  binId     String
+  bin       Bin      @relation(fields: [binId], references: [id], onDelete: Cascade)
+
+  weight    Float                    // kg
+  volume    Float                    // percentage 0–100
+  battery   Float                    // percentage 0–100
+  rssi      Int                      // dBm signal strength
+  wasteType String?                  // organik | anorganik | b3 | unknown
+
+  createdAt DateTime @default(now())
+
+  @@index([binId])
+  @@index([createdAt])
+  @@map("sensor_logs")
+}
+
+// ─────────────────────────────────────────────
+// Alert — threshold breach notifications
+// ─────────────────────────────────────────────
+enum AlertType {
+  FULL_WEIGHT
+  FULL_VOLUME
+  BATTERY_LOW
+}
+
+model Alert {
+  id        String    @id @default(cuid())
+  binId     String
+  bin       Bin       @relation(fields: [binId], references: [id], onDelete: Cascade)
+
+  type      AlertType
+  message   String
+  resolved  Boolean   @default(false)
+
+  createdAt DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@index([binId])
+  @@index([resolved])
+  @@map("alerts")
+}
+
+// ─────────────────────────────────────────────
+// User — admin and field officers
+// ─────────────────────────────────────────────
+enum UserRole {
+  ADMIN
+  PETUGAS
+}
+
+model User {
+  id          String   @id @default(cuid())
+  name        String
+  email       String   @unique
+  password    String
+  role        UserRole @default(PETUGAS)
+  deviceToken String?  // Firebase FCM token
+
+  // Relationships
+  areaId      String?  // If PETUGAS, which area they handle. If null, they might have no area assigned yet.
+  area        Area?    @relation(fields: [areaId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// Area — coverage area for bins and field officers
+// ─────────────────────────────────────────────
+model Area {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+
+  bins      Bin[]
+  users     User[]
+
+  @@map("areas")
+}
