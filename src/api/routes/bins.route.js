@@ -9,7 +9,7 @@ const router = Router();
 const ThresholdSchema = z.object({
     weightThreshold: z.number().positive().optional(),
     volumeThreshold: z.number().min(1).max(100).optional(),
-}).refine((d) => d.weightThreshold || d.volumeThreshold, {
+}).strict().refine((d) => d.weightThreshold || d.volumeThreshold, {
     message: 'At least one threshold must be provided',
 });
 
@@ -19,7 +19,7 @@ const CreateBinSchema = z.object({
     lat: z.number(),
     lng: z.number(),
     areaId: z.string().optional().nullable(),
-});
+}).strict();
 
 const UpdateBinSchema = z.object({
     nodeId: z.string().min(1).optional(),
@@ -27,7 +27,7 @@ const UpdateBinSchema = z.object({
     lat: z.number().optional(),
     lng: z.number().optional(),
     areaId: z.string().optional().nullable(),
-});
+}).strict();
 
 // GET /bins
 router.get('/', authenticate, listBins);

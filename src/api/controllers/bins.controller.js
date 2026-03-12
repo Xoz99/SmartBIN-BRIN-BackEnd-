@@ -16,6 +16,12 @@ export async function listBins(req, res) {
 export async function getBin(req, res) {
     const bin = await getBinById(req.params.id);
     if (!bin) return error(res, 'Bin not found', 404);
+
+    // Area ownership check — PETUGAS can only access bins in their area
+    if (req.user.role === 'PETUGAS' && req.user.areaId && bin.areaId && bin.areaId !== req.user.areaId) {
+        return error(res, 'Forbidden: bin is not in your area', 403);
+    }
+
     return success(res, bin);
 }
 
@@ -29,6 +35,11 @@ export async function getBinHistoryController(req, res) {
 
     const bin = await findBinById(id);
     if (!bin) return error(res, 'Bin not found', 404);
+
+    // Area ownership check — PETUGAS can only access bins in their area
+    if (req.user.role === 'PETUGAS' && req.user.areaId && bin.areaId && bin.areaId !== req.user.areaId) {
+        return error(res, 'Forbidden: bin is not in your area', 403);
+    }
 
     const { items, total } = await getBinHistory(id, limit, page);
     return paginated(res, items, total, page, limit, 'History retrieved');

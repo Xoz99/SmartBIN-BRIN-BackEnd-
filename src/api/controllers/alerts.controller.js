@@ -1,5 +1,4 @@
-import { getAlerts, resolveAlert } from '../../services/alert.service.js';
-import { findAllAlerts } from '../../models/alert.model.js';
+import { getAlerts, resolveAlert, getAlertWithBin } from '../../services/alert.service.js';
 import { success, error, paginated } from '../../utils/response.js';
 
 /**
@@ -22,10 +21,19 @@ export async function listAlerts(req, res) {
  */
 export async function resolveAlertController(req, res) {
     try {
+        // Area ownership check — PETUGAS can only resolve alerts in their area
+        if (req.user.role === 'PETUGAS' && req.user.areaId) {
+            const alertData = await getAlertWithBin(req.params.id);
+            if (!alertData) return error(res, 'Alert not found', 404);
+            if (alertData.bin?.areaId && alertData.bin.areaId !== req.user.areaId) {
+                return error(res, 'Forbidden: alert is not in your area', 403);
+            }
+        }
+
         const alert = await resolveAlert(req.params.id);
         return success(res, alert, 'Alert resolved');
     } catch (err) {
-        if (err.code === 'P2025') return error(res, 'Alert not found', 404); // Prisma not found
+        if (err.code === 'P2025') return error(res, 'Alert not found', 404);
         throw err;
     }
 }

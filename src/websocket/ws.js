@@ -1,4 +1,5 @@
 import { WebSocketServer } from 'ws';
+import { verifyToken } from '../services/auth.service.js';
 import { logger } from '../utils/logger.js';
 
 let wss;
@@ -8,11 +9,29 @@ let wss;
  * @param {import('http').Server} httpServer
  */
 export function initWebSocket(httpServer) {
-    wss = new WebSocketServer({ server: httpServer });
+    wss = new WebSocketServer({
+        server: httpServer,
+        verifyClient: (info, done) => {
+            try {
+                const url = new URL(info.req.url, `http://${info.req.headers.host}`);
+                const token = url.searchParams.get('token');
+                if (!token) {
+                    done(false, 401, 'Authentication required');
+                    return;
+                }
+                const decoded = verifyToken(token);
+                info.req.user = decoded;
+                done(true);
+            } catch {
+                done(false, 401, 'Invalid or expired token');
+            }
+        },
+    });
 
     wss.on('connection', (ws, req) => {
         const clientIp = req.socket.remoteAddress;
-        logger.info(`[WebSocket] Client connected: ${clientIp}`);
+        ws.user = req.user;
+        logger.info(`[WebSocket] Client connected: ${clientIp} (user: ${req.user?.email || 'unknown'})`);
 
         // Send welcome
         ws.send(JSON.stringify({ event: 'CONNECTED', payload: { message: 'SmartBin WebSocket ready' } }));

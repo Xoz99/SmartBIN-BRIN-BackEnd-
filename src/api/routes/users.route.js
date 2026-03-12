@@ -15,7 +15,7 @@ const createUserSchema = z.object({
     password: z.string().min(6),
     role: z.enum(['ADMIN', 'PETUGAS']).default('PETUGAS'),
     areaId: z.string().optional().nullable(),
-});
+}).strict();
 
 const updateUserSchema = z.object({
     name: z.string().min(2).optional(),
@@ -23,7 +23,7 @@ const updateUserSchema = z.object({
     password: z.string().min(6).optional(),
     role: z.enum(['ADMIN', 'PETUGAS']).optional(),
     areaId: z.string().optional().nullable(),
-});
+}).strict();
 
 router.get('/', getUsersController);
 router.get('/:id', getUserByIdController);

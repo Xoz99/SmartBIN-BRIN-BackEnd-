@@ -42,8 +42,8 @@ model SensorLog {
   weight    Float                    // kg
   volume    Float                    // percentage 0–100
   battery   Float                    // percentage 0–100
+  gas       Float?                   // ppm — gas sensor reading (MQ-x)
   rssi      Int                      // dBm signal strength
-  wasteType String?                  // organik | anorganik | b3 | unknown
 
   createdAt DateTime @default(now())
 
@@ -59,6 +59,7 @@ enum AlertType {
   FULL_WEIGHT
   FULL_VOLUME
   BATTERY_LOW
+  GAS_HIGH
 }
 
 model Alert {

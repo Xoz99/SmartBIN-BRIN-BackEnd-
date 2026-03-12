@@ -32,12 +32,13 @@ export const env = {
   JWT_SECRET: process.env.JWT_SECRET,
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '7d',
 
-  CLASSIFY_SERVICE_URL: process.env.CLASSIFY_SERVICE_URL || 'http://localhost:8000',
-
   FIREBASE_CREDENTIALS_PATH: process.env.FIREBASE_CREDENTIALS_PATH || '',
+
+  CORS_ORIGIN: process.env.CORS_ORIGIN || '',
 
   // Default thresholds (can be overridden per-bin via Redis)
   DEFAULT_WEIGHT_THRESHOLD: parseFloat(process.env.DEFAULT_WEIGHT_THRESHOLD) || 45,   // kg
   DEFAULT_VOLUME_THRESHOLD: parseFloat(process.env.DEFAULT_VOLUME_THRESHOLD) || 85,   // %
   DEFAULT_BATTERY_THRESHOLD: parseFloat(process.env.DEFAULT_BATTERY_THRESHOLD) || 20, // %
+  DEFAULT_GAS_THRESHOLD: parseFloat(process.env.DEFAULT_GAS_THRESHOLD) || 300,       // ppm
 };

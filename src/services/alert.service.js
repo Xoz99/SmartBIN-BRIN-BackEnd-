@@ -37,6 +37,11 @@ export async function checkThreshold(nodeId, binId, sensorData) {
             type: 'BATTERY_LOW',
             message: `Bin ${nodeId}: Battery low at ${sensorData.battery}%`,
         },
+        {
+            condition: sensorData.gas != null && sensorData.gas >= env.DEFAULT_GAS_THRESHOLD,
+            type: 'GAS_HIGH',
+            message: `Bin ${nodeId}: Gas level high at ${sensorData.gas}ppm (threshold ${env.DEFAULT_GAS_THRESHOLD}ppm)`,
+        },
     ];
 
     for (const check of checks) {
@@ -94,3 +99,16 @@ export async function getAlerts(user, { resolved } = {}, limit = 50, page = 1) {
 export async function resolveAlert(alertId) {
     return resolveAlertModel(alertId);
 }
+
+/**
+ * Get an alert with its bin info (for area ownership check)
+ * @param {string} alertId
+ */
+export async function getAlertWithBin(alertId) {
+    const { prisma } = await import('../config/db.js');
+    return prisma.alert.findUnique({
+        where: { id: alertId },
+        include: { bin: { select: { areaId: true } } },
+    });
+}
+

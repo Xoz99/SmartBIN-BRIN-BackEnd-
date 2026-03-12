@@ -49,8 +49,24 @@ export async function connectMqtt() {
     const client = createMqttClient();
     await new Promise((resolve, reject) => {
         if (client.connected) return resolve();
-        client.once('connect', resolve);
-        client.once('error', reject);
+
+        const timeout = setTimeout(() => {
+            client.removeAllListeners('connect');
+            client.end(true);
+            mqttClient = null;
+            reject(new Error(`MQTT connection timeout — broker at ${env.MQTT_BROKER_URL} unreachable`));
+        }, 10_000);
+
+        client.once('connect', () => {
+            clearTimeout(timeout);
+            resolve();
+        });
+        client.once('error', (err) => {
+            clearTimeout(timeout);
+            client.end(true);
+            mqttClient = null;
+            reject(err);
+        });
     });
     return client;
 }

@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
+import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { error as errorResponse } from '../utils/response.js';
 
@@ -8,7 +9,6 @@ import { error as errorResponse } from '../utils/response.js';
 import authRoutes from './routes/auth.route.js';
 import binsRoutes from './routes/bins.route.js';
 import alertsRoutes from './routes/alerts.route.js';
-import classifyRoutes from './routes/classify.route.js';
 import usersRoutes from './routes/users.route.js';
 import areasRoutes from './routes/areas.route.js';
 
@@ -17,7 +17,9 @@ export function createApp() {
 
     // ─── Global Middleware ────────────────────────────────────────────────────
     app.use(cors({
-        origin: '*',
+        origin: env.NODE_ENV === 'production'
+            ? (env.CORS_ORIGIN || 'http://localhost:3000')
+            : '*',
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
         allowedHeaders: ['Content-Type', 'Authorization'],
     }));
@@ -38,7 +40,6 @@ export function createApp() {
     app.use('/auth', authRoutes);
     app.use('/bins', binsRoutes);
     app.use('/alerts', alertsRoutes);
-    app.use('/classify', classifyRoutes);
     app.use('/users', usersRoutes);
     app.use('/areas', areasRoutes);
 

@@ -21,9 +21,17 @@ async function bootstrap() {
         logger.info('[Bootstrap] Connecting to Redis...');
         await connectRedis();
 
-        // 3. MQTT
+        // 3. MQTT (optional — server continues without it)
         logger.info('[Bootstrap] Connecting to MQTT broker...');
-        await connectMqtt();
+        try {
+            await connectMqtt();
+
+            // 6. MQTT Subscriber (only if MQTT connected)
+            logger.info('[Bootstrap] Starting MQTT subscriber...');
+            await startMqttSubscriber();
+        } catch (mqttErr) {
+            logger.warn(`[Bootstrap] ⚠️ MQTT unavailable: ${mqttErr.message || 'connection failed'}. Server running without MQTT.`);
+        }
 
         // 4. Express
         logger.info('[Bootstrap] Starting Express...');
@@ -33,10 +41,6 @@ async function bootstrap() {
         // 5. WebSocket
         logger.info('[Bootstrap] Initializing WebSocket server...');
         initWebSocket(server);
-
-        // 6. MQTT Subscriber
-        logger.info('[Bootstrap] Starting MQTT subscriber...');
-        await startMqttSubscriber();
 
         // Start listening
         server.listen(env.PORT, () => {

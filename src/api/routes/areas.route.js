@@ -11,11 +11,11 @@ router.use(authenticate, authorize('ADMIN'));
 
 const createAreaSchema = z.object({
     name: z.string().min(3).max(100),
-});
+}).strict();
 
 const updateAreaSchema = z.object({
     name: z.string().min(3).max(100),
-});
+}).strict();
 
 router.post('/', validate({ body: createAreaSchema }), createAreaController);
 router.get('/', getAreasController);

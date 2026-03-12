@@ -10,6 +10,7 @@ const SensorPayloadSchema = z.object({
     weight: z.number().min(0).max(200),     // kg
     volume: z.number().min(0).max(100),     // %
     battery: z.number().min(0).max(100),    // %
+    gas: z.number().min(0).optional(),      // ppm — gas sensor (MQ-x)
     rssi: z.number().int().optional().default(-999),
 });
 
@@ -41,8 +42,8 @@ export async function handleSensorData(nodeId, rawPayload) {
             weight: data.weight,
             volume: data.volume,
             battery: data.battery,
+            gas: data.gas ?? null,
             rssi: data.rssi,
-            wasteType: null, // populated by image classification separately
         },
     });
 
@@ -65,9 +66,11 @@ export async function handleSensorData(nodeId, rawPayload) {
         weight: data.weight,
         volume: data.volume,
         battery: data.battery,
+        gas: data.gas ?? null,
         rssi: data.rssi,
         timestamp: log.createdAt,
     });
 
-    logger.debug(`[SensorHandler] ✓ Saved log for ${nodeId} | w=${data.weight}kg v=${data.volume}% b=${data.battery}%`);
+    logger.debug(`[SensorHandler] ✓ Saved log for ${nodeId} | w=${data.weight}kg v=${data.volume}% b=${data.battery}% g=${data.gas ?? '-'}ppm`);
 }
+

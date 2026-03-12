@@ -2,8 +2,13 @@ import { createArea, getAllAreas, getAreaById, updateArea, deleteArea } from '..
 import { success, error } from '../../utils/response.js';
 
 export async function createAreaController(req, res) {
-    const area = await createArea(req.body);
-    return success(res, area, 'Area created', 201);
+    try {
+        const area = await createArea(req.body);
+        return success(res, area, 'Area created', 201);
+    } catch (err) {
+        if (err.code === 'P2002') return error(res, 'Area with this name already exists', 409);
+        throw err;
+    }
 }
 
 export async function getAreasController(req, res) {
@@ -23,6 +28,7 @@ export async function updateAreaController(req, res) {
         return success(res, area, 'Area updated');
     } catch (err) {
         if (err.code === 'P2025') return error(res, 'Area not found', 404);
+        if (err.code === 'P2002') return error(res, 'Area with this name already exists', 409);
         throw err;
     }
 }
@@ -33,6 +39,8 @@ export async function deleteAreaController(req, res) {
         return success(res, null, 'Area deleted');
     } catch (err) {
         if (err.code === 'P2025') return error(res, 'Area not found', 404);
+        if (err.code === 'P2003') return error(res, 'Cannot delete area: it still has bins or users assigned', 409);
         throw err;
     }
 }
+

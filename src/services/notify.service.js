@@ -1,5 +1,6 @@
 import admin from 'firebase-admin';
-import { createRequire } from 'module';
+import fs from 'fs';
+import path from 'path';
 import { env } from '../config/env.js';
 import { findAllPetugas } from '../models/user.model.js';
 import { logger } from '../utils/logger.js';
@@ -14,8 +15,9 @@ function initFirebase() {
     }
 
     try {
-        const require = createRequire(import.meta.url);
-        const credentials = require(env.FIREBASE_CREDENTIALS_PATH);
+        const credPath = path.resolve(env.FIREBASE_CREDENTIALS_PATH);
+        const raw = fs.readFileSync(credPath, 'utf-8');
+        const credentials = JSON.parse(raw);
         admin.initializeApp({
             credential: admin.credential.cert(credentials),
         });

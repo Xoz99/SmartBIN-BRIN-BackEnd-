@@ -39,14 +39,3 @@ export async function findLatestByBinId(binId) {
     });
 }
 
-/**
- * Update wasteType on a specific log (after image classification)
- * @param {string} logId
- * @param {string} wasteType
- */
-export async function updateWasteType(logId, wasteType) {
-    return prisma.sensorLog.update({
-        where: { id: logId },
-        data: { wasteType },
-    });
-}
