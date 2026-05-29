@@ -1,4 +1,4 @@
-import { getAllBins, getBinById, getBinHistory, setThreshold } from '../../services/bin.service.js';
+import { getAllBins, getBinById, getBinHistory, setThreshold, getOptimalRoute } from '../../services/bin.service.js';
 import { findBinById, createBin as createBinModel, updateBin as updateBinModel, deleteBin as deleteBinModel } from '../../models/bin.model.js';
 import { success, error, paginated } from '../../utils/response.js';
 
@@ -8,6 +8,26 @@ import { success, error, paginated } from '../../utils/response.js';
 export async function listBins(req, res) {
     const bins = await getAllBins(req.user);
     return success(res, bins, 'Bins retrieved');
+}
+
+/**
+ * GET /bins/route/optimal?lat=x&lng=y
+ */
+export async function getOptimalRouteController(req, res) {
+    const { lat, lng } = req.query;
+    if (!lat || !lng) {
+        return error(res, 'Titik koordinat awal (lat, lng) wajib disertakan untuk kalkulasi rute', 400);
+    }
+    
+    const originLat = parseFloat(lat);
+    const originLng = parseFloat(lng);
+
+    if (isNaN(originLat) || isNaN(originLng)) {
+        return error(res, 'Format koordinat lat/lng tidak valid', 400);
+    }
+
+    const result = await getOptimalRoute(originLat, originLng, req.user);
+    return success(res, result, 'Rute optimal berhasil di-generate');
 }
 
 /**

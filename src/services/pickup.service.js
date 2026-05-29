@@ -1,0 +1,91 @@
+import { createPickup, findAllPickups, findPickupById, confirmLatestPendingBySensor } from '../models/pickup.model.js';
+import { findBinById } from '../models/bin.model.js';
+import { findActiveAlert } from '../models/alert.model.js';
+import { broadcast } from '../websocket/ws.js';
+import { logger } from '../utils/logger.js';
+
+/**
+ * Petugas menekan tombol "Selesai" setelah mengambil sampah.
+ * Membuat record Pickup (checkpoint: siapa/kapan/GPS), status MENUNGGU_SENSOR.
+ *
+ * @param {string} binId
+ * @param {object} user - req.user (petugas/admin yang menekan)
+ * @param {{ lat?: number, lng?: number }} location
+ * @returns {Promise<{ pickup?: object, error?: { message: string, status: number } }>}
+ */
+export async function completePickup(binId, user, { lat, lng } = {}) {
+    const bin = await findBinById(binId);
+    if (!bin) return { error: { message: 'Bin not found', status: 404 } };
+
+    // Area ownership — PETUGAS hanya boleh menyelesaikan pickup di areanya
+    if (user.role === 'PETUGAS' && user.areaId && bin.areaId && bin.areaId !== user.areaId) {
+        return { error: { message: 'Forbidden: bin is not in your area', status: 403 } };
+    }
+
+    // Kaitkan dengan alert "penuh" yang sedang aktif (jika ada)
+    const activeAlert =
+        (await findActiveAlert(binId, 'FULL_VOLUME')) ||
+        (await findActiveAlert(binId, 'FULL_WEIGHT'));
+
+    const pickup = await createPickup({
+        binId,
+        petugasId: user.id,
+        areaId: bin.areaId,
+        alertId: activeAlert?.id ?? null,
+        completedLat: typeof lat === 'number' ? lat : null,
+        completedLng: typeof lng === 'number' ? lng : null,
+    });
+
+    logger.info(`[PickupService] ✅ ${user.email} menyelesaikan pickup bin ${bin.nodeId} (menunggu konfirmasi sensor)`);
+
+    broadcast('PICKUP_COMPLETED', {
+        pickupId: pickup.id,
+        binId,
+        nodeId: bin.nodeId,
+        petugasId: user.id,
+        status: pickup.status,
+        completedAt: pickup.completedAt,
+        areaId: bin.areaId,
+    });
+
+    return { pickup };
+}
+
+/**
+ * Sensor checkpoint — dipanggil dari alert.service saat alert FULL auto-resolve.
+ * Menandai pickup MENUNGGU_SENSOR untuk bin tsb menjadi SELESAI.
+ * @param {string} binId
+ * @param {string} nodeId
+ */
+export async function confirmPickupBySensor(binId, nodeId) {
+    const pickup = await confirmLatestPendingBySensor(binId);
+    if (!pickup) return null;
+
+    logger.info(`[PickupService] 🛰️ Sensor mengkonfirmasi pickup bin ${nodeId} SELESAI (pickup ${pickup.id})`);
+
+    broadcast('PICKUP_CONFIRMED', {
+        pickupId: pickup.id,
+        binId,
+        nodeId,
+        petugasId: pickup.petugasId,
+        status: pickup.status,
+        sensorConfirmedAt: pickup.sensorConfirmedAt,
+        areaId: pickup.areaId,
+    });
+
+    return pickup;
+}
+
+/**
+ * List pickups (admin: semua; petugas: areanya)
+ */
+export async function getPickups(user, filters, limit, page) {
+    return findAllPickups(user, filters, limit, page);
+}
+
+/**
+ * Detail satu pickup
+ */
+export async function getPickupById(id) {
+    return findPickupById(id);
+}

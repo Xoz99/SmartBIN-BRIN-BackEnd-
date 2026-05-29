@@ -1,3 +1,4 @@
+import { prisma } from '../../config/db.js';
 import { redisClient } from '../../config/redis.js';
 import { broadcast } from '../../websocket/ws.js';
 import { logger } from '../../utils/logger.js';
@@ -12,6 +13,12 @@ export async function handleStatusData(nodeId, payload) {
 
     if (!['online', 'offline'].includes(status)) {
         logger.warn(`[StatusHandler] Invalid status payload from ${nodeId}:`, payload);
+        return;
+    }
+
+    const bin = await prisma.bin.findUnique({ where: { nodeId }, select: { id: true } });
+    if (!bin) {
+        logger.warn(`[StatusHandler] Unknown nodeId: ${nodeId}. Status discarded.`);
         return;
     }
 

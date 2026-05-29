@@ -1,6 +1,6 @@
 """
-SmartBin — YOLOv5 Classification Microservice
-FastAPI + torch (YOLOv5 nano)
+SmartBin — YOLOv8 Classification Microservice
+FastAPI + ultralytics (YOLOv8)
 
 Endpoints:
   POST /classify  — multipart file OR JSON { image: base64 }
@@ -9,7 +9,7 @@ Endpoints:
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import torch
+from ultralytics import YOLO
 import base64
 import io
 import os
@@ -24,7 +24,7 @@ CLASSES = ["organik", "anorganik", "b3"]
 
 app = FastAPI(
     title="SmartBin Classify Service",
-    description="YOLOv5 nano waste classification microservice",
+    description="YOLOv8 waste classification microservice",
     version="1.0.0",
 )
 
@@ -45,16 +45,8 @@ async def load_model():
         print(f"[WARN] Model not found at {MODEL_PATH}. Service will return 503 for classify requests.")
         return
     try:
-        model = torch.hub.load(
-            "ultralytics/yolov5",
-            "custom",
-            path=str(MODEL_PATH),
-            force_reload=False,
-            verbose=False,
-        )
-        model.conf = CONFIDENCE_THRESHOLD
-        model.classes = list(range(len(CLASSES)))
-        print(f"[INFO] YOLOv5 model loaded from {MODEL_PATH}")
+        model = YOLO(str(MODEL_PATH))
+        print(f"[INFO] YOLOv8 model loaded from {MODEL_PATH}")
     except Exception as e:
         print(f"[ERROR] Failed to load model: {e}")
         model = None
@@ -62,27 +54,31 @@ async def load_model():
 
 # ─── Helper ───────────────────────────────────────────────────────────────────
 def run_inference(image: Image.Image) -> dict:
-    """Run YOLOv5 inference and return structured result."""
+    """Run YOLOv8 inference and return structured result."""
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded. Place best.pt in classify/model/")
 
-    results = model(image)
-    detections = results.pandas().xyxy[0]  # DataFrame
-
+    results = model(image, conf=CONFIDENCE_THRESHOLD, classes=list(range(len(CLASSES))), verbose=False)
+    
     all_detections = []
-    for _, row in detections.iterrows():
-        class_idx = int(row["class"])
-        label = CLASSES[class_idx] if class_idx < len(CLASSES) else f"class_{class_idx}"
-        all_detections.append({
-            "label": label,
-            "confidence": round(float(row["confidence"]), 4),
-            "bbox": {
-                "x1": round(float(row["xmin"]), 2),
-                "y1": round(float(row["ymin"]), 2),
-                "x2": round(float(row["xmax"]), 2),
-                "y2": round(float(row["ymax"]), 2),
-            },
-        })
+    if len(results) > 0:
+        boxes = results[0].boxes
+        for box in boxes:
+            class_idx = int(box.cls[0].item())
+            confidence = float(box.conf[0].item())
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            
+            label = CLASSES[class_idx] if class_idx < len(CLASSES) else f"class_{class_idx}"
+            all_detections.append({
+                "label": label,
+                "confidence": round(confidence, 4),
+                "bbox": {
+                    "x1": round(x1, 2),
+                    "y1": round(y1, 2),
+                    "x2": round(x2, 2),
+                    "y2": round(y2, 2),
+                },
+            })
 
     # Sort by confidence descending
     all_detections.sort(key=lambda x: x["confidence"], reverse=True)

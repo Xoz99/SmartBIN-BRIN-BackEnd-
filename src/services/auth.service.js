@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { findUserByEmail, findUserById } from '../models/user.model.js';
+import { prisma } from '../config/db.js';
 import { env } from '../config/env.js';
 
 /**
@@ -46,4 +47,25 @@ export function verifyToken(token) {
  */
 export async function hashPassword(password) {
     return bcrypt.hash(password, 12);
+}
+
+/**
+ * Change a user's password — verifies old, hashes new
+ * @param {string} userId
+ * @param {string} oldPassword
+ * @param {string} newPassword
+ */
+export async function changePassword(userId, oldPassword, newPassword) {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw Object.assign(new Error('User not found'), { statusCode: 404 });
+
+    const valid = await bcrypt.compare(oldPassword, user.password);
+    if (!valid) throw Object.assign(new Error('Old password is incorrect'), { statusCode: 400 });
+
+    if (oldPassword === newPassword) {
+        throw Object.assign(new Error('New password must be different'), { statusCode: 400 });
+    }
+
+    const hashed = await hashPassword(newPassword);
+    await prisma.user.update({ where: { id: userId }, data: { password: hashed } });
 }

@@ -34,6 +34,8 @@ export const env = {
 
   FIREBASE_CREDENTIALS_PATH: process.env.FIREBASE_CREDENTIALS_PATH || '',
 
+  CLASSIFY_SERVICE_URL: process.env.CLASSIFY_SERVICE_URL || 'http://localhost:8000',
+
   CORS_ORIGIN: process.env.CORS_ORIGIN || '',
 
   // Default thresholds (can be overridden per-bin via Redis)

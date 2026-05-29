@@ -1,0 +1,18 @@
+[Unit]
+Description=SmartBin LoRa-to-MQTT Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/smartbin-gateway
+EnvironmentFile=/home/pi/smartbin-gateway/.env
+ExecStart=/home/pi/smartbin-gw-venv/bin/python /home/pi/smartbin-gateway/gateway.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

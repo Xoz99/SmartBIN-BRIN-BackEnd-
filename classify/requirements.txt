@@ -2,10 +2,4 @@ fastapi==0.110.0
 uvicorn[standard]==0.29.0
 python-multipart==0.0.9
 pillow==10.3.0
-torch==2.2.2
-torchvision==0.17.2
-# YOLOv5 (installed via torch.hub or manually)
-# If using torch.hub, torch pulls it automatically.
-# For offline / reproducible setup, clone ultralytics/yolov5 and use local path.
-pandas==2.2.1
-numpy==1.26.4
+ultralytics>=8.1.0

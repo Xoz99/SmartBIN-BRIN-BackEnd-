@@ -2,6 +2,7 @@ import { mqttClient } from '../config/mqtt.js';
 import { ALL_TOPICS, parseNodeId, getTopicType } from './topics.js';
 import { handleSensorData } from './handlers/sensorData.js';
 import { handleStatusData } from './handlers/statusData.js';
+import { handleImageData } from './handlers/imageData.js';
 import { logger } from '../utils/logger.js';
 
 export async function startMqttSubscriber() {
@@ -50,9 +51,9 @@ export async function startMqttSubscriber() {
                 break;
 
             case 'image':
-                // Image classification is handled by the /classify HTTP endpoint when called from RPi
-                // Here we just log — add classification logic if needed
-                logger.debug(`[MQTT] Image received from ${nodeId} (${String(payload).length} chars)`);
+                await handleImageData(nodeId, payload).catch((err) =>
+                    logger.error(`[MQTT] imageData handler error (${nodeId}):`, err.message)
+                );
                 break;
 
             default:

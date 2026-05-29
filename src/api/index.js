@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import morgan from 'morgan';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
@@ -11,11 +12,14 @@ import binsRoutes from './routes/bins.route.js';
 import alertsRoutes from './routes/alerts.route.js';
 import usersRoutes from './routes/users.route.js';
 import areasRoutes from './routes/areas.route.js';
+import pickupsRoutes from './routes/pickups.route.js';
 
 export function createApp() {
     const app = express();
 
     // ─── Global Middleware ────────────────────────────────────────────────────
+    app.use(helmet());
+
     app.use(cors({
         origin: env.NODE_ENV === 'production'
             ? (env.CORS_ORIGIN || 'http://localhost:3000')
@@ -42,6 +46,7 @@ export function createApp() {
     app.use('/alerts', alertsRoutes);
     app.use('/users', usersRoutes);
     app.use('/areas', areasRoutes);
+    app.use('/pickups', pickupsRoutes);
 
     // ─── 404 handler ─────────────────────────────────────────────────────────
     app.use((_req, res) => {

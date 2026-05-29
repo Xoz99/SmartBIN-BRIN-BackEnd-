@@ -22,6 +22,11 @@ export async function getAreaByIdController(req, res) {
     return success(res, area);
 }
 
+export async function getAreawithBinController(req, res) {
+    const areas = await getAllAreaswithBin();
+    return success(res, areas, "Area retrieved with bins", 200);
+}
+
 export async function updateAreaController(req, res) {
     try {
         const area = await updateArea(req.params.id, req.body);

@@ -1,6 +1,7 @@
 import { findActiveAlert, createAlert, findAllAlerts, resolveAlert as resolveAlertModel } from '../models/alert.model.js';
 import { getBinThreshold } from './bin.service.js';
 import { sendPushNotif } from './notify.service.js';
+import { confirmPickupBySensor } from './pickup.service.js';
 import { broadcast } from '../websocket/ws.js';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
@@ -33,19 +34,44 @@ export async function checkThreshold(nodeId, binId, sensorData) {
             message: `Bin ${nodeId}: Volume ${sensorData.volume}% has reached threshold ${threshold.volume}%`,
         },
         {
-            condition: sensorData.battery <= env.DEFAULT_BATTERY_THRESHOLD,
+            condition: sensorData.battery <= threshold.battery,
             type: 'BATTERY_LOW',
-            message: `Bin ${nodeId}: Battery low at ${sensorData.battery}%`,
+            message: `Bin ${nodeId}: Battery low at ${sensorData.battery}% (threshold ${threshold.battery}%)`,
         },
         {
-            condition: sensorData.gas != null && sensorData.gas >= env.DEFAULT_GAS_THRESHOLD,
+            condition: sensorData.gas != null && sensorData.gas >= threshold.gas,
             type: 'GAS_HIGH',
-            message: `Bin ${nodeId}: Gas level high at ${sensorData.gas}ppm (threshold ${env.DEFAULT_GAS_THRESHOLD}ppm)`,
+            message: `Bin ${nodeId}: Gas level high at ${sensorData.gas}ppm (threshold ${threshold.gas}ppm)`,
         },
     ];
 
     for (const check of checks) {
-        if (!check.condition) continue;
+        if (!check.condition) {
+            // Auto-resolve (Checkpoint Otomatis)
+            // Jika sensor membaca volume/berat sudah turun (di bawah threshold) 
+            // dan sebelumnya ada alert aktif, maka sistem otomatis me-resolve alert tersebut
+            if (check.type === 'FULL_WEIGHT' || check.type === 'FULL_VOLUME') {
+                const existing = await findActiveAlert(binId, check.type);
+                if (existing) {
+                    await resolveAlertModel(existing.id);
+                    logger.info(`[AlertService] 🧹 Auto-resolved ${check.type} alert for ${nodeId} (Bin has been emptied)`);
+                    
+                    broadcast('ALERT_RESOLVED', {
+                        alertId: existing.id,
+                        nodeId,
+                        binId,
+                        type: check.type
+                    });
+
+                    // Checkpoint sensor: kalau ada petugas yg sudah tekan "Selesai"
+                    // (pickup MENUNGGU_SENSOR), tandai pickup tsb terverifikasi SELESAI.
+                    await confirmPickupBySensor(binId, nodeId).catch((err) =>
+                        logger.error('[AlertService] Gagal konfirmasi pickup via sensor:', err.message)
+                    );
+                }
+            }
+            continue;
+        }
 
         // Deduplicate — skip if alert already active
         const existing = await findActiveAlert(binId, check.type);

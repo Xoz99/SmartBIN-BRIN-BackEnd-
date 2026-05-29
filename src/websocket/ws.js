@@ -79,7 +79,7 @@ export function initWebSocket(httpServer) {
 /**
  * Broadcast a typed event to ALL connected WebSocket clients
  *
- * @param {'BIN_UPDATE'|'ALERT_NEW'|'BIN_STATUS'} event
+ * @param {'BIN_UPDATE'|'ALERT_NEW'|'ALERT_RESOLVED'|'BIN_STATUS'|'CLASSIFICATION_NEW'|'PICKUP_COMPLETED'|'PICKUP_CONFIRMED'} event
  * @param {object} payload
  */
 export function broadcast(event, payload) {

@@ -1,0 +1,7 @@
+paho-mqtt>=2.0
+python-dotenv>=1.0
+# LoRa (RFM9x / SX127x via SPI). Skip these if LORA_DRIVER=mock during testing.
+adafruit-blinka>=8.0
+adafruit-circuitpython-rfm9x>=2.2
+# Camera (optional — only if CAMERA_NODE_ID is set)
+picamera2>=0.3 ; sys_platform == "linux"

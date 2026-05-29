@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { listBins, getBin, getBinHistoryController, setThresholdController, createBinController, updateBinController, deleteBinController } from '../controllers/bins.controller.js';
+import { listBins, getBin, getBinHistoryController, setThresholdController, createBinController, updateBinController, deleteBinController, getOptimalRouteController } from '../controllers/bins.controller.js';
 import { authenticate, authorize } from '../middlewares/auth.middleware.js';
 import { validate } from '../middlewares/validate.js';
 
@@ -9,9 +9,12 @@ const router = Router();
 const ThresholdSchema = z.object({
     weightThreshold: z.number().positive().optional(),
     volumeThreshold: z.number().min(1).max(100).optional(),
-}).strict().refine((d) => d.weightThreshold || d.volumeThreshold, {
-    message: 'At least one threshold must be provided',
-});
+    gasThreshold: z.number().positive().optional(),
+    batteryThreshold: z.number().min(1).max(100).optional(),
+}).strict().refine(
+    (d) => d.weightThreshold !== undefined || d.volumeThreshold !== undefined || d.gasThreshold !== undefined || d.batteryThreshold !== undefined,
+    { message: 'At least one threshold must be provided' },
+);
 
 const CreateBinSchema = z.object({
     nodeId: z.string().min(1),
@@ -28,6 +31,9 @@ const UpdateBinSchema = z.object({
     lng: z.number().optional(),
     areaId: z.string().optional().nullable(),
 }).strict();
+
+// GET /bins/route/optimal
+router.get('/route/optimal', authenticate, getOptimalRouteController);
 
 // GET /bins
 router.get('/', authenticate, listBins);

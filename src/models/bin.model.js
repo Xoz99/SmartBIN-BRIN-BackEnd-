@@ -58,3 +58,30 @@ export async function createBin(data) {
 export async function deleteBin(id) {
     return prisma.bin.delete({ where: { id } });
 }
+
+/**
+ * Find bins that have active alerts for full weight/volume
+ * @param {object} user 
+ */
+export async function findFullBins(user) {
+    const where = {};
+    if (user && user.role === 'PETUGAS' && user.areaId) {
+        where.areaId = user.areaId;
+    }
+    
+    where.alerts = {
+        some: {
+            resolved: false,
+            type: { in: ['FULL_WEIGHT', 'FULL_VOLUME'] }
+        }
+    };
+
+    return prisma.bin.findMany({
+        where,
+        include: {
+            alerts: {
+                where: { resolved: false }
+            }
+        }
+    });
+}
