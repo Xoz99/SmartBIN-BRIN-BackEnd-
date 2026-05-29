@@ -13,6 +13,7 @@ export async function findAllBins(user) {
     return prisma.bin.findMany({
         where,
         orderBy: { createdAt: 'asc' },
+        include: { area: true },
     });
 }
 
@@ -21,7 +22,7 @@ export async function findAllBins(user) {
  * @param {string} id
  */
 export async function findBinById(id) {
-    return prisma.bin.findUnique({ where: { id } });
+    return prisma.bin.findUnique({ where: { id }, include: { area: true } });
 }
 
 /**
@@ -40,7 +41,7 @@ export async function findBinByNodeId(nodeId) {
  * @param {{ location?: string }} data
  */
 export async function updateBin(id, data) {
-    return prisma.bin.update({ where: { id }, data });
+    return prisma.bin.update({ where: { id }, data, include: { area: true } });
 }
 
 /**
@@ -48,7 +49,7 @@ export async function updateBin(id, data) {
  * @param {{ nodeId, location, lat, lng, areaId? }} data
  */
 export async function createBin(data) {
-    return prisma.bin.create({ data });
+    return prisma.bin.create({ data, include: { area: true } });
 }
 
 /**

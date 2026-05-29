@@ -17,9 +17,13 @@ async function bootstrap() {
         logger.info('[Bootstrap] Connecting to PostgreSQL...');
         await connectDB();
 
-        // 2. Redis
+        // 2. Redis (optional — server continues without it)
         logger.info('[Bootstrap] Connecting to Redis...');
-        await connectRedis();
+        try {
+            await connectRedis();
+        } catch (redisErr) {
+            logger.warn(`[Bootstrap] ⚠️ Redis unavailable: ${redisErr.message || 'connection failed'}. Server running without Redis (caching disabled).`);
+        }
 
         // 3. MQTT (optional — server continues without it)
         logger.info('[Bootstrap] Connecting to MQTT broker...');

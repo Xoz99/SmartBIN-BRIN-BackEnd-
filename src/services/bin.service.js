@@ -9,15 +9,24 @@ import QRCode from 'qrcode';
  * Get all bins enriched with live Redis status and latest sensor data
  * @param {object} user - The user requesting the bins
  */
+async function safeRedisGet(key) {
+    try {
+        if (!redisClient || redisClient.status !== 'ready') return null;
+        return await redisClient.get(key);
+    } catch {
+        return null;
+    }
+}
+
 export async function getAllBins(user) {
     const bins = await findAllBins(user);
 
     const enriched = await Promise.all(
         bins.map(async (bin) => {
             const [latest, status, lastSeen] = await Promise.all([
-                redisClient.get(`bin:${bin.nodeId}:latest`),
-                redisClient.get(`bin:${bin.nodeId}:status`),
-                redisClient.get(`bin:${bin.nodeId}:lastSeen`),
+                safeRedisGet(`bin:${bin.nodeId}:latest`),
+                safeRedisGet(`bin:${bin.nodeId}:status`),
+                safeRedisGet(`bin:${bin.nodeId}:lastSeen`),
             ]);
             return {
                 ...bin,
@@ -40,8 +49,8 @@ export async function getBinById(id) {
     if (!bin) return null;
 
     const [latest, status] = await Promise.all([
-        redisClient.get(`bin:${bin.nodeId}:latest`),
-        redisClient.get(`bin:${bin.nodeId}:status`),
+        safeRedisGet(`bin:${bin.nodeId}:latest`),
+        safeRedisGet(`bin:${bin.nodeId}:status`),
     ]);
 
     const threshold = await getBinThreshold(bin.nodeId);
