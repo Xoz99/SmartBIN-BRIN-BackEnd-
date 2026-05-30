@@ -48,13 +48,19 @@ export async function handleSensorData(nodeId, rawPayload) {
     });
 
     // 4. Cache latest reading in Redis (TTL: 1 hour)
-    const cacheKey = `bin:${nodeId}:latest`;
-    await redisClient.set(
-        cacheKey,
-        JSON.stringify({ ...data, timestamp: log.createdAt, logId: log.id }),
-        'EX',
-        3600
-    );
+    if (redisClient) {
+        try {
+            const cacheKey = `bin:${nodeId}:latest`;
+            await redisClient.set(
+                cacheKey,
+                JSON.stringify({ ...data, timestamp: log.createdAt, logId: log.id }),
+                'EX',
+                3600
+            );
+        } catch (cacheErr) {
+            logger.warn(`[SensorHandler] Failed to cache latest reading in Redis: ${cacheErr.message}`);
+        }
+    }
 
     // 5. Check thresholds and trigger alerts if needed
     await checkThreshold(nodeId, bin.id, data);
