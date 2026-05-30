@@ -18,8 +18,12 @@ export function initWebSocket(httpServer) {
         server: httpServer,
         verifyClient: (info, done) => {
             try {
+                // Prefer the Authorization header (keeps the token out of URLs/access logs).
+                // Fall back to the ?token= query param for backward compatibility.
+                const authHeader = info.req.headers['authorization'] || '';
+                const headerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
                 const url = new URL(info.req.url, `http://${info.req.headers.host}`);
-                const token = url.searchParams.get('token');
+                const token = headerToken || url.searchParams.get('token');
                 if (!token) {
                     done(false, 401, 'Authentication required');
                     return;
@@ -36,7 +40,8 @@ export function initWebSocket(httpServer) {
     wss.on('connection', (ws, req) => {
         const clientIp = req.socket.remoteAddress;
         ws.user = req.user;
-        logger.info(`[WebSocket] Client connected: ${clientIp} (user: ${req.user?.email || 'unknown'})`);
+        // Log at debug level and avoid PII (use the user id, not the email).
+        logger.debug(`[WebSocket] Client connected (userId: ${req.user?.id || 'unknown'})`);
 
         // Send welcome
         ws.send(JSON.stringify({ event: 'CONNECTED', payload: { message: 'SmartBin WebSocket ready' } }));
@@ -56,7 +61,7 @@ export function initWebSocket(httpServer) {
         });
 
         ws.on('close', () => {
-            logger.info(`[WebSocket] Client disconnected: ${clientIp}`);
+            logger.debug(`[WebSocket] Client disconnected (userId: ${req.user?.id || 'unknown'})`);
         });
 
         ws.on('error', (err) => {
