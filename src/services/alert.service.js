@@ -56,7 +56,7 @@ export async function checkThreshold(nodeId, binId, sensorData) {
                     await resolveAlertModel(existing.id);
                     logger.info(`[AlertService] 🧹 Auto-resolved ${check.type} alert for ${nodeId} (Bin has been emptied)`);
                     
-                    broadcast('ALERT_RESOLVED', {
+                    await broadcast('ALERT_RESOLVED', {
                         alertId: existing.id,
                         nodeId,
                         binId,
@@ -90,7 +90,7 @@ export async function checkThreshold(nodeId, binId, sensorData) {
         logger.warn(`[AlertService] 🚨 Alert created: ${check.message}`);
 
         // Broadcast via WebSocket
-        broadcast('ALERT_NEW', {
+        await broadcast('ALERT_NEW', {
             alertId: alert.id,
             nodeId,
             binId,

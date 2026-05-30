@@ -66,7 +66,7 @@ export async function handleSensorData(nodeId, rawPayload) {
     await checkThreshold(nodeId, bin.id, data);
 
     // 6. Broadcast to WebSocket clients
-    broadcast('BIN_UPDATE', {
+    await broadcast('BIN_UPDATE', {
         nodeId,
         binId: bin.id,
         weight: data.weight,

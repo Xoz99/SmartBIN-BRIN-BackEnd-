@@ -80,6 +80,7 @@ export async function findFullBins(user) {
     return prisma.bin.findMany({
         where,
         include: {
+            area: true,
             alerts: {
                 where: { resolved: false }
             }

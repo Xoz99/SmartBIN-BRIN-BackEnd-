@@ -31,7 +31,7 @@ export async function handleStatusData(nodeId, payload) {
     await redisClient.set(lastSeenKey, now, 'EX', 86400); // 24h
 
     // Broadcast to WebSocket clients
-    broadcast('BIN_STATUS', { nodeId, status, lastSeen: now });
+    await broadcast('BIN_STATUS', { nodeId, status, lastSeen: now });
 
     logger.debug(`[StatusHandler] ${nodeId} → ${status}`);
 }

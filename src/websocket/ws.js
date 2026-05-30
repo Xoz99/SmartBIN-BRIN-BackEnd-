@@ -1,8 +1,13 @@
 import { WebSocketServer } from 'ws';
 import { verifyToken } from '../services/auth.service.js';
+import { redisClient, createRedisClient } from '../config/redis.js';
 import { logger } from '../utils/logger.js';
 
 let wss;
+let subClient;
+
+// Redis channel used to bridge broadcasts across processes (API, MQTT handlers, CLI scripts)
+const WS_CHANNEL = 'ws:broadcast';
 
 /**
  * Initialize WebSocket server attached to the existing HTTP server
@@ -73,29 +78,67 @@ export function initWebSocket(httpServer) {
 
     wss.on('close', () => clearInterval(heartbeat));
 
+    // Subscribe to the Redis bridge so broadcasts published by *any* process reach our clients
+    setupRedisSubscriber();
+
     logger.info('[WebSocket] Server initialized');
 }
 
-/**
- * Broadcast a typed event to ALL connected WebSocket clients
- *
- * @param {'BIN_UPDATE'|'ALERT_NEW'|'ALERT_RESOLVED'|'BIN_STATUS'|'CLASSIFICATION_NEW'|'PICKUP_COMPLETED'|'PICKUP_CONFIRMED'} event
- * @param {object} payload
- */
-export function broadcast(event, payload) {
+/** Server-process Redis subscriber: receives broadcasts and fans them out to local WS clients. */
+function setupRedisSubscriber() {
+    try {
+        subClient = createRedisClient().duplicate();
+        subClient.on('error', (err) => logger.warn(`[WebSocket] Redis subscriber error: ${err.message}`));
+        subClient.subscribe(WS_CHANNEL, (err) => {
+            if (err) logger.error(`[WebSocket] Failed to subscribe '${WS_CHANNEL}': ${err.message}`);
+            else logger.info(`[WebSocket] Subscribed to Redis channel '${WS_CHANNEL}'`);
+        });
+        subClient.on('message', (channel, message) => {
+            if (channel === WS_CHANNEL) sendToLocalClients(message);
+        });
+    } catch (err) {
+        logger.warn(`[WebSocket] Redis subscriber unavailable: ${err.message}. Cross-process broadcast disabled.`);
+    }
+}
+
+/** Send a pre-serialized message to all OPEN clients connected to THIS process. */
+function sendToLocalClients(message) {
     if (!wss) return;
-
-    const message = JSON.stringify({ event, payload });
     let sent = 0;
-
     wss.clients.forEach((ws) => {
         if (ws.readyState === ws.OPEN) {
             ws.send(message);
             sent++;
         }
     });
+    logger.debug(`[WebSocket] Delivered to ${sent} client(s)`);
+}
 
-    logger.debug(`[WebSocket] Broadcast '${event}' to ${sent} client(s)`);
+/**
+ * Broadcast a typed event to ALL connected WebSocket clients.
+ *
+ * Publishes to Redis so it works regardless of which process calls it
+ * (HTTP API, MQTT handlers, or standalone CLI scripts). The server process
+ * receives it via {@link setupRedisSubscriber} and fans it out to its clients.
+ * Falls back to a direct in-process send when Redis is unavailable.
+ *
+ * @param {'BIN_UPDATE'|'ALERT_NEW'|'ALERT_RESOLVED'|'BIN_STATUS'|'CLASSIFICATION_NEW'|'PICKUP_COMPLETED'|'PICKUP_CONFIRMED'} event
+ * @param {object} payload
+ */
+export async function broadcast(event, payload) {
+    const message = JSON.stringify({ event, payload });
+
+    if (redisClient && redisClient.status === 'ready') {
+        try {
+            await redisClient.publish(WS_CHANNEL, message);
+            return;
+        } catch (err) {
+            logger.warn(`[WebSocket] Redis publish failed (${err.message}); falling back to direct send`);
+        }
+    }
+
+    // Fallback: Redis down — deliver directly to clients of this process (server only)
+    sendToLocalClients(message);
 }
 
 export { wss };
