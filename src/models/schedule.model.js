@@ -53,3 +53,31 @@ export async function updateSchedule(id, data) {
 export async function deleteSchedule(id) {
     return prisma.schedule.delete({ where: { id } });
 }
+
+/**
+ * Cari jadwal aktif (PENDING/PROSES) milik petugas di area & tanggal tertentu.
+ * Dipakai untuk auto-update status saat pickup.
+ * @param {string} petugasId
+ * @param {string|null} areaId
+ * @param {Date} date
+ */
+export async function findActiveScheduleFor(petugasId, areaId, date) {
+    const start = new Date(date);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+
+    return prisma.schedule.findFirst({
+        where: {
+            petugasId,
+            areaId: areaId ?? null,
+            date: { gte: start, lt: end },
+            status: { in: ['PENDING', 'PROSES'] },
+        },
+        orderBy: { createdAt: 'desc' },
+    });
+}
+
+export async function setScheduleStatus(id, status) {
+    return prisma.schedule.update({ where: { id }, data: { status } });
+}

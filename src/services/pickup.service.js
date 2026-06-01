@@ -1,8 +1,36 @@
-import { createPickup, findAllPickups, findPickupById, confirmLatestPendingBySensor } from '../models/pickup.model.js';
+import { createPickup, findAllPickups, findPickupById, confirmLatestPendingBySensor, countConfirmedPickups } from '../models/pickup.model.js';
 import { findBinById } from '../models/bin.model.js';
 import { findActiveAlert } from '../models/alert.model.js';
+import { findActiveScheduleFor, setScheduleStatus } from '../models/schedule.model.js';
 import { broadcast } from '../websocket/ws.js';
 import { logger } from '../utils/logger.js';
+
+/**
+ * Auto-update status jadwal petugas berdasarkan aktivitas pickup.
+ * - phase 'start'   : jadwal PENDING → PROSES (petugas mulai mengangkut)
+ * - phase 'confirm' : jadwal → SELESAI jika jumlah pickup terkonfirmasi >= binTarget
+ */
+async function syncSchedule(petugasId, areaId, date, phase) {
+    try {
+        const sched = await findActiveScheduleFor(petugasId, areaId, date);
+        if (!sched) return;
+
+        if (phase === 'confirm') {
+            const confirmed = await countConfirmedPickups(petugasId, areaId, sched.date);
+            const target = sched.binTarget || 0;
+            const next = target > 0 && confirmed >= target ? 'SELESAI' : 'PROSES';
+            if (sched.status !== next) {
+                await setScheduleStatus(sched.id, next);
+                broadcast('SCHEDULE_UPDATED', { scheduleId: sched.id, petugasId, status: next });
+            }
+        } else if (sched.status === 'PENDING') {
+            await setScheduleStatus(sched.id, 'PROSES');
+            broadcast('SCHEDULE_UPDATED', { scheduleId: sched.id, petugasId, status: 'PROSES' });
+        }
+    } catch (e) {
+        logger.warn(`[ScheduleSync] gagal update jadwal: ${e.message}`);
+    }
+}
 
 /**
  * Petugas menekan tombol "Selesai" setelah mengambil sampah.
@@ -48,6 +76,9 @@ export async function completePickup(binId, user, { lat, lng } = {}) {
         areaId: bin.areaId,
     });
 
+    // Auto-update jadwal: PENDING → PROSES
+    await syncSchedule(user.id, bin.areaId, new Date(), 'start');
+
     return { pickup };
 }
 
@@ -72,6 +103,9 @@ export async function confirmPickupBySensor(binId, nodeId) {
         sensorConfirmedAt: pickup.sensorConfirmedAt,
         areaId: pickup.areaId,
     });
+
+    // Auto-update jadwal: SELESAI jika target bin tercapai
+    await syncSchedule(pickup.petugasId, pickup.areaId, pickup.completedAt || new Date(), 'confirm');
 
     return pickup;
 }

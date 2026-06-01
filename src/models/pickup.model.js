@@ -15,6 +15,29 @@ export async function createPickup(data) {
 }
 
 /**
+ * Hitung pickup yang sudah terkonfirmasi sensor (SELESAI) untuk seorang petugas
+ * di sebuah area pada tanggal tertentu. Dipakai untuk menentukan jadwal SELESAI.
+ * @param {string} petugasId
+ * @param {string|null} areaId
+ * @param {Date} date
+ */
+export async function countConfirmedPickups(petugasId, areaId, date) {
+    const start = new Date(date);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+
+    return prisma.pickup.count({
+        where: {
+            petugasId,
+            areaId: areaId ?? null,
+            status: 'SELESAI',
+            completedAt: { gte: start, lt: end },
+        },
+    });
+}
+
+/**
  * List pickups (paginated, newest first), with optional area scoping & status filter.
  * PETUGAS hanya melihat pickup di areanya.
  * @param {object} user
