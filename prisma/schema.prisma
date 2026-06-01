@@ -133,7 +133,8 @@ model User {
   areaId String? // If PETUGAS, which area they handle. If null, they might have no area assigned yet.
   area   Area?   @relation(fields: [areaId], references: [id])
 
-  pickups Pickup[] // Pickups completed by this officer
+  pickups   Pickup[] // Pickups completed by this officer
+  schedules Schedule[] // Jadwal tugas yang ditetapkan admin untuk petugas ini
 
   createdAt DateTime @default(now())
 
@@ -148,8 +149,9 @@ model Area {
   name      String   @unique
   createdAt DateTime @default(now())
 
-  bins  Bin[]
-  users User[]
+  bins      Bin[]
+  users     User[]
+  schedules Schedule[]
 
   @@map("areas")
 }
@@ -191,4 +193,39 @@ model Pickup {
   @@index([petugasId])
   @@index([status])
   @@map("pickups")
+}
+
+// ─────────────────────────────────────────────
+// Schedule — jadwal tugas yang ditetapkan admin per petugas
+// ─────────────────────────────────────────────
+enum ScheduleStatus {
+  PENDING // Belum dikerjakan
+  PROSES // Sedang dikerjakan
+  SELESAI // Selesai
+}
+
+model Schedule {
+  id String @id @default(cuid())
+
+  petugasId String
+  petugas   User   @relation(fields: [petugasId], references: [id], onDelete: Cascade)
+
+  areaId String? // Snapshot area petugas saat jadwal dibuat
+  area   Area?   @relation(fields: [areaId], references: [id])
+
+  date      DateTime // Tanggal jadwal
+  startTime String // Jam mulai, mis. "08.00"
+  endTime   String // Jam selesai, mis. "10.00"
+  truck     String? // Nomor truk/rute, mis. "TRK-01"
+  binTarget Int     @default(0) // Target jumlah bin
+  note      String? // Catatan opsional
+
+  status ScheduleStatus @default(PENDING)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([petugasId])
+  @@index([date])
+  @@map("schedules")
 }

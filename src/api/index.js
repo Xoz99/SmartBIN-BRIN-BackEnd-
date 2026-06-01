@@ -13,6 +13,7 @@ import alertsRoutes from './routes/alerts.route.js';
 import usersRoutes from './routes/users.route.js';
 import areasRoutes from './routes/areas.route.js';
 import pickupsRoutes from './routes/pickups.route.js';
+import schedulesRoutes from './routes/schedules.route.js';
 
 export function createApp() {
     const app = express();
@@ -47,6 +48,7 @@ export function createApp() {
     app.use('/users', usersRoutes);
     app.use('/areas', areasRoutes);
     app.use('/pickups', pickupsRoutes);
+    app.use('/schedules', schedulesRoutes);
 
     // ─── 404 handler ─────────────────────────────────────────────────────────
     app.use((_req, res) => {
