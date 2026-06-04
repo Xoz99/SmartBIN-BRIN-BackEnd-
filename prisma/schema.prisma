@@ -187,6 +187,10 @@ model Pickup {
   // Checkpoint dari sensor
   sensorConfirmedAt DateTime?
 
+  // Checkpoint konfirmasi manual (fallback kalau sensor error / tak terbaca)
+  manualConfirmedAt   DateTime?
+  manualConfirmedById String? // user (petugas/admin) yang menutup manual
+
   createdAt DateTime @default(now())
 
   @@index([binId])

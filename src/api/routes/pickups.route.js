@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { completePickupController, listPickupsController, getPickupController } from '../controllers/pickups.controller.js';
+import { completePickupController, manualConfirmPickupController, listPickupsController, getPickupController } from '../controllers/pickups.controller.js';
 import { authenticate, authorize } from '../middlewares/auth.middleware.js';
 import { validate } from '../middlewares/validate.js';
 
@@ -18,6 +18,14 @@ router.post(
     authorize('ADMIN', 'PETUGAS'),
     validate({ body: CompletePickupSchema }),
     completePickupController,
+);
+
+// POST /pickups/:id/confirm — konfirmasi manual (fallback sensor error) — petugas (area-nya) + admin
+router.post(
+    '/:id/confirm',
+    authenticate,
+    authorize('ADMIN', 'PETUGAS'),
+    manualConfirmPickupController,
 );
 
 // GET /pickups — list riwayat (petugas hanya areanya)

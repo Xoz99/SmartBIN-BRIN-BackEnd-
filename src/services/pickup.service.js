@@ -1,4 +1,4 @@
-import { createPickup, findAllPickups, findPickupById, confirmLatestPendingBySensor, countConfirmedPickups } from '../models/pickup.model.js';
+import { createPickup, findAllPickups, findPickupById, confirmLatestPendingBySensor, confirmPickupManual, countConfirmedPickups } from '../models/pickup.model.js';
 import { findBinById } from '../models/bin.model.js';
 import { findActiveAlert } from '../models/alert.model.js';
 import { findActiveScheduleFor, setScheduleStatus } from '../models/schedule.model.js';
@@ -108,6 +108,44 @@ export async function confirmPickupBySensor(binId, nodeId) {
     await syncSchedule(pickup.petugasId, pickup.areaId, pickup.completedAt || new Date(), 'confirm');
 
     return pickup;
+}
+
+/**
+ * Konfirmasi manual oleh petugas/admin — fallback saat sensor error.
+ * Menandai pickup MENUNGGU_SENSOR menjadi SELESAI tanpa nunggu sensor.
+ * @param {string} id - id pickup
+ * @param {object} user - req.user (yang menekan)
+ * @returns {Promise<{ pickup?: object, error?: { message: string, status: number } }>}
+ */
+export async function manualConfirmPickup(id, user) {
+    const pickup = await findPickupById(id);
+    if (!pickup) return { error: { message: 'Pickup not found', status: 404 } };
+    if (pickup.status === 'SELESAI') return { error: { message: 'Pickup sudah selesai', status: 409 } };
+
+    // Area ownership — PETUGAS hanya boleh menutup pickup di areanya
+    if (user.role === 'PETUGAS' && user.areaId && pickup.areaId && pickup.areaId !== user.areaId) {
+        return { error: { message: 'Forbidden: pickup is not in your area', status: 403 } };
+    }
+
+    const updated = await confirmPickupManual(pickup.id, user.id);
+
+    logger.info(`[PickupService] ✋ ${user.email} mengonfirmasi MANUAL pickup bin ${updated.bin?.nodeId ?? updated.binId} SELESAI (pickup ${updated.id})`);
+
+    broadcast('PICKUP_CONFIRMED', {
+        pickupId: updated.id,
+        binId: updated.binId,
+        nodeId: updated.bin?.nodeId,
+        petugasId: updated.petugasId,
+        status: updated.status,
+        sensorConfirmedAt: updated.sensorConfirmedAt,
+        manualConfirmedAt: updated.manualConfirmedAt,
+        areaId: updated.areaId,
+    });
+
+    // Auto-update jadwal: SELESAI jika target bin tercapai
+    await syncSchedule(updated.petugasId, updated.areaId, updated.completedAt || new Date(), 'confirm');
+
+    return { pickup: updated };
 }
 
 /**

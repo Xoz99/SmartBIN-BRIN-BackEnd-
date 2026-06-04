@@ -98,3 +98,17 @@ export async function confirmLatestPendingBySensor(binId) {
         include: { bin: binSelect, petugas: petugasSelect },
     });
 }
+
+/**
+ * Konfirmasi manual: tandai pickup SELESAI tanpa nunggu sensor.
+ * Fallback saat sensor error / tidak terbaca. Mencatat siapa yang menutup.
+ * @param {string} id - id pickup
+ * @param {string} userId - user (petugas/admin) yang menutup
+ */
+export async function confirmPickupManual(id, userId) {
+    return prisma.pickup.update({
+        where: { id },
+        data: { status: 'SELESAI', manualConfirmedAt: new Date(), manualConfirmedById: userId },
+        include: { bin: binSelect, petugas: petugasSelect },
+    });
+}

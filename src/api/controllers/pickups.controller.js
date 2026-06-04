@@ -1,4 +1,4 @@
-import { completePickup, getPickups, getPickupById } from '../../services/pickup.service.js';
+import { completePickup, manualConfirmPickup, getPickups, getPickupById } from '../../services/pickup.service.js';
 import { success, error, paginated } from '../../utils/response.js';
 
 /**
@@ -11,6 +11,17 @@ export async function completePickupController(req, res) {
 
     if (err) return error(res, err.message, err.status);
     return success(res, pickup, 'Pickup dicatat, menunggu konfirmasi sensor', 201);
+}
+
+/**
+ * POST /pickups/:id/confirm
+ * Petugas/Admin konfirmasi manual — fallback saat sensor error.
+ */
+export async function manualConfirmPickupController(req, res) {
+    const { pickup, error: err } = await manualConfirmPickup(req.params.id, req.user);
+
+    if (err) return error(res, err.message, err.status);
+    return success(res, pickup, 'Pickup dikonfirmasi manual (selesai)');
 }
 
 /**
