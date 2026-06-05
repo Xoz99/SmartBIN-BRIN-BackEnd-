@@ -1,6 +1,6 @@
 import { createPickup, findAllPickups, findPickupById, confirmLatestPendingBySensor, confirmPickupManual, countConfirmedPickups } from '../models/pickup.model.js';
 import { findBinById } from '../models/bin.model.js';
-import { findActiveAlert } from '../models/alert.model.js';
+import { findActiveAlert, resolveAlert } from '../models/alert.model.js';
 import { findActiveScheduleFor, setScheduleStatus } from '../models/schedule.model.js';
 import { broadcast } from '../websocket/ws.js';
 import { logger } from '../utils/logger.js';
@@ -130,6 +130,19 @@ export async function manualConfirmPickup(id, user) {
     const updated = await confirmPickupManual(pickup.id, user.id);
 
     logger.info(`[PickupService] ✋ ${user.email} mengonfirmasi MANUAL pickup bin ${updated.bin?.nodeId ?? updated.binId} SELESAI (pickup ${updated.id})`);
+
+    // Resolve alert "penuh" yang nyangkut (sensor mungkin error & tak auto-resolve),
+    // supaya badge/notifikasi admin ikut bersih. Kumpulkan dari alertId pickup + alert aktif.
+    const alertIds = new Set();
+    if (pickup.alertId) alertIds.add(pickup.alertId);
+    const activeVol = await findActiveAlert(updated.binId, 'FULL_VOLUME');
+    const activeWt  = await findActiveAlert(updated.binId, 'FULL_WEIGHT');
+    if (activeVol) alertIds.add(activeVol.id);
+    if (activeWt) alertIds.add(activeWt.id);
+    for (const alertId of alertIds) {
+        await resolveAlert(alertId).catch((e) => logger.warn(`[PickupService] gagal resolve alert ${alertId}: ${e.message}`));
+        broadcast('ALERT_RESOLVED', { alertId, nodeId: updated.bin?.nodeId, binId: updated.binId, type: 'FULL_VOLUME' });
+    }
 
     broadcast('PICKUP_CONFIRMED', {
         pickupId: updated.id,
