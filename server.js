@@ -51,6 +51,15 @@ async function bootstrap() {
             logger.info(`[Bootstrap] 🚀 SmartBin Backend running on port ${env.PORT} (${env.NODE_ENV})`);
         });
 
+        // 7. Snapshot volume zona harian (grafik 7 hari) — backfill + scheduler ringan
+        try {
+            const { backfillSnapshots, startSnapshotScheduler } = await import('./src/services/snapshot.service.js');
+            await backfillSnapshots(7);
+            startSnapshotScheduler();
+        } catch (snapErr) {
+            logger.warn(`[Bootstrap] ⚠️ Snapshot scheduler gagal: ${snapErr.message}`);
+        }
+
     } catch (err) {
         logger.error('[Bootstrap] Startup failed:', err.message);
         process.exit(1);

@@ -24,24 +24,26 @@ export async function checkThreshold(nodeId, binId, sensorData) {
 
     const checks = [
         {
-            condition: sensorData.weight >= threshold.weight,
+            // hanya dicek kalau sensornya benar-benar mengirim (tong tanpa load cell → skip)
+            condition: sensorData.weight != null && sensorData.weight >= threshold.weight,
             type: 'FULL_WEIGHT',
-            message: `Bin ${nodeId}: Weight ${sensorData.weight}kg has reached threshold ${threshold.weight}kg`,
+            message: `Tong ${nodeId}: Berat ${sensorData.weight} kg melebihi ambang ${threshold.weight} kg`,
         },
         {
-            condition: sensorData.volume >= threshold.volume,
+            condition: sensorData.volume != null && sensorData.volume >= threshold.volume,
             type: 'FULL_VOLUME',
-            message: `Bin ${nodeId}: Volume ${sensorData.volume}% has reached threshold ${threshold.volume}%`,
+            message: `Tong ${nodeId}: Volume ${sensorData.volume}% melebihi ambang ${threshold.volume}%`,
         },
         {
-            condition: sensorData.battery <= threshold.battery,
+            // baterai: skip kalau tong belum punya sensor baterai (jangan alert palsu)
+            condition: sensorData.battery != null && sensorData.battery <= threshold.battery,
             type: 'BATTERY_LOW',
-            message: `Bin ${nodeId}: Battery low at ${sensorData.battery}% (threshold ${threshold.battery}%)`,
+            message: `Tong ${nodeId}: Baterai lemah ${sensorData.battery}% (ambang ${threshold.battery}%)`,
         },
         {
             condition: sensorData.gas != null && sensorData.gas >= threshold.gas,
             type: 'GAS_HIGH',
-            message: `Bin ${nodeId}: Gas level high at ${sensorData.gas}ppm (threshold ${threshold.gas}ppm)`,
+            message: `Tong ${nodeId}: Kadar gas tinggi ${sensorData.gas} ppm (ambang ${threshold.gas} ppm)`,
         },
     ];
 

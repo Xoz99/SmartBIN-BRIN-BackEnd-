@@ -5,15 +5,20 @@ import { prisma } from '../config/db.js';
  * @param {object} user - The user requesting the bins
  */
 export async function findAllBins(user) {
+    // Catatan: dulu PETUGAS difilter ke areaId-nya saja. Sekarang petugas
+    // melihat SEMUA bin (sama seperti admin) karena pembagian area belum dipakai.
     const where = {};
-    if (user && user.role === 'PETUGAS' && user.areaId) {
-        where.areaId = user.areaId;
-    }
 
     return prisma.bin.findMany({
         where,
         orderBy: { createdAt: 'asc' },
-        include: { area: true },
+        include: {
+            area: true,
+            sensorLogs: {
+                orderBy: { createdAt: 'desc' },
+                take: 1,
+            },
+        },
     });
 }
 
@@ -65,11 +70,9 @@ export async function deleteBin(id) {
  * @param {object} user 
  */
 export async function findFullBins(user) {
+    // Petugas melihat semua bin penuh (filter area dinonaktifkan).
     const where = {};
-    if (user && user.role === 'PETUGAS' && user.areaId) {
-        where.areaId = user.areaId;
-    }
-    
+
     where.alerts = {
         some: {
             resolved: false,

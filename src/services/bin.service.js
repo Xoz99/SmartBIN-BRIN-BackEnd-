@@ -1,4 +1,4 @@
-import { findAllBins, findBinById, findBinByNodeId, updateBin, findFullBins } from '../models/bin.model.js';
+import { findAllBins, findBinById, findBinByNodeId, updateBin } from '../models/bin.model.js';
 import { findLogsByBinId, findLatestByBinId } from '../models/sensorLog.model.js';
 import { redisClient } from '../config/redis.js';
 import { env } from '../config/env.js';
@@ -113,72 +113,166 @@ export async function getBinThreshold(nodeId) {
     };
 }
 
-function haversine(lat1, lon1, lat2, lon2) {
-    const R = 6371; // Radius of Earth in km
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-              Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
+const OSRM_BASE = 'https://router.project-osrm.org';
+
+/**
+ * Ambil duration matrix antar semua titik via OSRM /table
+ * coords: array of { lat, lng }
+ * Return: matrix NxN (detik)
+ */
+async function osrmTable(coords) {
+    const coordStr = coords.map(c => `${c.lng},${c.lat}`).join(';');
+    const url = `${OSRM_BASE}/table/v1/driving/${coordStr}?annotations=duration`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`OSRM table error: ${res.status}`);
+    const data = await res.json();
+    if (data.code !== 'Ok') throw new Error(`OSRM: ${data.message}`);
+    return data.durations; // matrix[i][j] = detik dari i ke j
+}
+
+/**
+ * Ambil polyline rute lengkap via OSRM /route
+ * Return: { geometry (GeoJSON coords [[lon,lat]]), distance (m), duration (s) }
+ */
+async function osrmRoute(coords) {
+    const coordStr = coords.map(c => `${c.lng},${c.lat}`).join(';');
+    const url = `${OSRM_BASE}/route/v1/driving/${coordStr}?overview=full&geometries=geojson`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`OSRM route error: ${res.status}`);
+    const data = await res.json();
+    if (data.code !== 'Ok' || !data.routes?.length) throw new Error('OSRM: no route found');
+    return {
+        geometry:  data.routes[0].geometry.coordinates, // [[lon, lat], ...]
+        distance:  data.routes[0].distance,
+        duration:  data.routes[0].duration,
+    };
+}
+
+/**
+ * Greedy TSP Nearest Neighbor menggunakan duration matrix OSRM
+ * nodes: array index (0 = origin, 1..n = bins)
+ * matrix: NxN duration matrix
+ * Return: urutan index yang optimal
+ */
+function tspNearestNeighbor(matrix) {
+    const n = matrix.length;
+    const visited = new Array(n).fill(false);
+    const order = [0];
+    visited[0] = true;
+
+    for (let step = 1; step < n; step++) {
+        const last = order[order.length - 1];
+        let nearest = -1, minDur = Infinity;
+        for (let j = 1; j < n; j++) { // skip 0 (origin)
+            if (!visited[j] && matrix[last][j] < minDur) {
+                minDur = matrix[last][j];
+                nearest = j;
+            }
+        }
+        if (nearest === -1) break;
+        visited[nearest] = true;
+        order.push(nearest);
+    }
+    return order;
 }
 
 /**
  * Get the most optimal route for full bins based on starting coordinates
+ * Menggunakan OSRM real road routing, fallback ke Haversine jika OSRM gagal
  */
 export async function getOptimalRoute(originLat, originLng, user) {
-    const fullBins = await findFullBins(user);
+    // Rutekan ke SEMUA bin terdaftar (penuh atau tidak), skip koordinat 0,0
+    const all = await findAllBins(user);
+    const fullBins = (all || []).filter(b => b.lat != null && b.lng != null && !(b.lat === 0 && b.lng === 0));
+    const routeTarget = 'all';
+
     if (!fullBins || fullBins.length === 0) {
-        return { route: [], googleMapsUrl: null, message: "Bagus! Tidak ada tempat sampah yang penuh." };
+        return { route: [], polyline: null, googleMapsUrl: null, message: 'Belum ada tempat sampah dengan koordinat terdaftar.' };
     }
 
-    // Greedy TSP - Nearest Neighbor
-    let currentLat = originLat;
-    let currentLng = originLng;
-    let unvisited = [...fullBins];
-    const route = [];
+    // Semua titik: [origin, ...bins]
+    const allPoints = [
+        { lat: originLat, lng: originLng },
+        ...fullBins.map(b => ({ lat: b.lat, lng: b.lng })),
+    ];
 
-    while (unvisited.length > 0) {
-        let nearestIdx = 0;
-        let minDistance = Infinity;
+    let orderedBins;
+    let polyline = null;
+    let totalDistance = null;
+    let totalDuration = null;
+    let routingMethod = 'osrm';
 
-        for (let i = 0; i < unvisited.length; i++) {
-            const dist = haversine(currentLat, currentLng, unvisited[i].lat, unvisited[i].lng);
-            if (dist < minDistance) {
-                minDistance = dist;
-                nearestIdx = i;
+    try {
+        // 1. Duration matrix OSRM
+        const matrix = await osrmTable(allPoints);
+
+        // 2. TSP nearest neighbor pakai durasi jalan asli
+        const order = tspNearestNeighbor(matrix);
+
+        // order[0] = 0 (origin), order[1..] = index bin (1-based dalam allPoints)
+        orderedBins = order.slice(1).map((idx, i) => {
+            const bin = fullBins[idx - 1];
+            return {
+                ...bin,
+                durationFromPreviousMin: Math.round(matrix[order[i]][idx] / 60),
+            };
+        });
+
+        // 3. Polyline rute lengkap dari OSRM /route
+        const routeCoords = order.map(i => allPoints[i]);
+        const osrmRes = await osrmRoute(routeCoords);
+        // OSRM returns [lon, lat] — flip ke [lat, lon] untuk Leaflet
+        polyline = osrmRes.geometry.map(c => [c[1], c[0]]);
+        totalDistance = osrmRes.distance;
+        totalDuration = osrmRes.duration;
+
+    } catch (err) {
+        logger.warn(`[BinService] OSRM gagal, fallback Haversine: ${err.message}`);
+        routingMethod = 'haversine-fallback';
+
+        // Fallback: greedy nearest neighbor pakai Haversine
+        let curLat = originLat, curLng = originLng;
+        const unvisited = [...fullBins];
+        orderedBins = [];
+        while (unvisited.length > 0) {
+            let nearestIdx = 0, minDist = Infinity;
+            for (let i = 0; i < unvisited.length; i++) {
+                const R = 6371;
+                const dLat = (unvisited[i].lat - curLat) * Math.PI / 180;
+                const dLon = (unvisited[i].lng - curLng) * Math.PI / 180;
+                const a = Math.sin(dLat/2)**2 + Math.cos(curLat*Math.PI/180)*Math.cos(unvisited[i].lat*Math.PI/180)*Math.sin(dLon/2)**2;
+                const d = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+                if (d < minDist) { minDist = d; nearestIdx = i; }
             }
+            const next = unvisited.splice(nearestIdx, 1)[0];
+            next.durationFromPreviousMin = null;
+            orderedBins.push(next);
+            curLat = next.lat; curLng = next.lng;
         }
-
-        const nextBin = unvisited.splice(nearestIdx, 1)[0];
-        nextBin.distanceFromPreviousKm = Number(minDistance.toFixed(2));
-        route.push(nextBin);
-        
-        currentLat = nextBin.lat;
-        currentLng = nextBin.lng;
     }
 
-    const destination = route[route.length - 1];
-    let googleMapsUrl = `https://www.google.com/maps/dir/?api=1&origin=${originLat},${originLng}&destination=${destination.lat},${destination.lng}&travelmode=driving`;
-    
-    if (route.length > 1) {
-        // Exclude the last bin from waypoints, as it's the destination
-        const waypoints = route.slice(0, route.length - 1).map(b => `${b.lat},${b.lng}`).join('|');
+    // Google Maps URL
+    const dest = orderedBins[orderedBins.length - 1];
+    let googleMapsUrl = `https://www.google.com/maps/dir/?api=1&origin=${originLat},${originLng}&destination=${dest.lat},${dest.lng}&travelmode=driving`;
+    if (orderedBins.length > 1) {
+        const waypoints = orderedBins.slice(0, -1).map(b => `${b.lat},${b.lng}`).join('|');
         googleMapsUrl += `&waypoints=${waypoints}`;
     }
 
-    let qrCodeBase64 = null;
-    if (googleMapsUrl) {
-        qrCodeBase64 = await QRCode.toDataURL(googleMapsUrl, {
-            width: 400,
-            margin: 2,
-            color: {
-                dark: '#000000',
-                light: '#ffffff'
-            }
-        });
-    }
+    // QR Code
+    const qrCodeBase64 = await QRCode.toDataURL(googleMapsUrl, {
+        width: 400, margin: 2,
+        color: { dark: '#000000', light: '#ffffff' },
+    }).catch(() => null);
 
-    return { route, googleMapsUrl, qrCodeBase64 };
+    return {
+        route: orderedBins,
+        polyline,
+        totalDistanceKm: totalDistance ? +(totalDistance / 1000).toFixed(2) : null,
+        totalDurationMin: totalDuration ? Math.round(totalDuration / 60) : null,
+        routingMethod,
+        routeTarget,
+        googleMapsUrl,
+        qrCodeBase64,
+    };
 }
