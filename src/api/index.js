@@ -14,6 +14,11 @@ import usersRoutes from './routes/users.route.js';
 import areasRoutes from './routes/areas.route.js';
 import pickupsRoutes from './routes/pickups.route.js';
 import schedulesRoutes from './routes/schedules.route.js';
+import prediksiRoutes from './routes/prediksi.route.js';
+import depositsRoutes from './routes/deposits.route.js';
+import disposalsRoutes from './routes/disposals.route.js';
+import settingsRoutes from './routes/settings.route.js';
+import analyticsRoutes from './routes/analytics.route.js';
 
 export function createApp() {
     const app = express();
@@ -49,6 +54,11 @@ export function createApp() {
     app.use('/areas', areasRoutes);
     app.use('/pickups', pickupsRoutes);
     app.use('/schedules', schedulesRoutes);
+    app.use('/prediksi', prediksiRoutes);
+    app.use('/deposits', depositsRoutes);
+    app.use('/disposals', disposalsRoutes);
+    app.use('/settings', settingsRoutes);
+    app.use('/analytics', analyticsRoutes);
 
     // ─── 404 handler ─────────────────────────────────────────────────────────
     app.use((_req, res) => {

@@ -11,6 +11,15 @@ export const TOPICS = {
 export const ALL_TOPICS = Object.values(TOPICS);
 
 /**
+ * Topic perintah keluar ke ESP bin tertentu (mis. perintah pilah)
+ * e.g. commandTopic("bin-001") → "smartbin/bin-001/command"
+ * @param {string} nodeId
+ */
+export function commandTopic(nodeId) {
+    return `smartbin/${nodeId}/command`;
+}
+
+/**
  * Parse nodeId from a topic string
  * e.g. "smartbin/bin-001/sensor" → "bin-001"
  * @param {string} topic

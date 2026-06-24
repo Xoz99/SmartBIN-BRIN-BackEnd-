@@ -1,0 +1,33 @@
+# ============================================================
+# Dependencies untuk PEMILAH SAMPAH di Raspberry Pi
+# Alur: kamera HP (lewat /scan, HTTPS) -> klasifikasi -> serial ke ESP32
+# ============================================================
+
+# Web server
+fastapi==0.136.3
+uvicorn==0.48.0
+python-multipart==0.0.30
+starlette==1.2.1
+pydantic==2.13.4
+pydantic_core==2.46.4
+
+# Runtime model TFLite (klasifikasi sampah)
+#  - Raspberry Pi OS 64-bit: ai-edge-litert ada wheel aarch64.
+#  - Kalau gagal di Pi 32-bit, ganti baris ini dengan:  tflite-runtime
+ai-edge-litert==2.1.5
+
+# Gambar & angka
+numpy==2.4.6
+pillow==12.2.0
+
+# Serial ke ESP32 (USB)
+pyserial==3.5
+
+# Gemini tips (opsional — endpoint /genai/*). Boleh dihapus kalau tak dipakai.
+google-genai==2.7.0
+google-auth==2.53.0
+
+# ── OPSIONAL: kamera lokal (webcam yang dicolok ke Raspi, BUKAN kamera HP) ──
+# Kalau mau pakai webcam langsung di Raspi, install salah satu:
+#   pip install opencv-python-headless
+# main.py tetap jalan tanpa ini (kamera HP via /scan tidak butuh opencv).

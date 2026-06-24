@@ -35,6 +35,7 @@ model Bin {
   alerts          Alert[]
   classifications Classification[]
   pickups         Pickup[]
+  deposits        Deposit[]
 
   @@map("bins")
 }
@@ -50,8 +51,9 @@ model SensorLog {
   weight  Float // kg
   volume  Float // percentage 0–100
   battery Float // percentage 0–100
-  gas     Float? // ppm — gas sensor reading (MQ-x)
-  rssi    Int // dBm signal strength
+  gas      Float? // ppm — gas sensor reading (MQ-x)
+  distance Float? // cm — VL53L0X laser distance sensor (fill level)
+  rssi     Int    // dBm signal strength
 
   createdAt DateTime @default(now())
 
@@ -119,6 +121,7 @@ model Classification {
 enum UserRole {
   ADMIN
   PETUGAS
+  WARGA
 }
 
 model User {
@@ -135,10 +138,33 @@ model User {
 
   pickups   Pickup[] // Pickups completed by this officer
   schedules Schedule[] // Jadwal tugas yang ditetapkan admin untuk petugas ini
+  deposits  Deposit[] // Setoran sampah yang discan user (WARGA)
 
   createdAt DateTime @default(now())
 
   @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// Deposit — catatan setoran sampah hasil scan WARGA
+// ─────────────────────────────────────────────
+model Deposit {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+  binId  String
+  bin    Bin    @relation(fields: [binId], references: [id], onDelete: Cascade)
+
+  label      WasteLabel
+  confidence Float?
+  weight     Float? // diisi belakangan dari sensor/load-cell (opsional)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([binId])
+  @@index([createdAt])
+  @@map("deposits")
 }
 
 // ─────────────────────────────────────────────
@@ -232,4 +258,26 @@ model Schedule {
   @@index([petugasId])
   @@index([date])
   @@map("schedules")
+}
+
+model Disposal {
+  id          String   @id @default(cuid())
+  kecamatan   String   // nama kecamatan (UPPERCASE), match KEC_COORDS di prediksi.service
+  weightKg    Float    // kg yang dikonfirmasi dimusnahkan
+  confirmedBy String?  // userId petugas/admin yang konfirmasi
+  createdAt   DateTime @default(now())
+
+  @@index([kecamatan])
+  @@index([createdAt])
+  @@map("disposals")
+}
+
+model ZoneSnapshot {
+  id        String   @id @default(cuid())
+  day       String   // tanggal "YYYY-MM-DD" (satu baris per hari, unik)
+  totalKg   Float    // total volume sampah (kg) semua zona pada hari itu
+  createdAt DateTime @default(now())
+
+  @@unique([day])
+  @@map("zone_snapshots")
 }

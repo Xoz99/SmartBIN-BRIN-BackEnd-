@@ -1,9 +1,47 @@
 import { createPickup, findAllPickups, findPickupById, confirmLatestPendingBySensor, confirmPickupManual, countConfirmedPickups } from '../models/pickup.model.js';
 import { findBinById } from '../models/bin.model.js';
-import { findActiveAlert, resolveAlert } from '../models/alert.model.js';
+import { findActiveAlert, resolveAllAlertsForBin } from '../models/alert.model.js';
 import { findActiveScheduleFor, setScheduleStatus } from '../models/schedule.model.js';
 import { broadcast } from '../websocket/ws.js';
 import { logger } from '../utils/logger.js';
+import { prisma } from '../config/db.js';
+import { redisClient } from '../config/redis.js';
+import { setConfirmedWeight } from '../config/weightMode.js';
+
+/**
+ * Reset isi tong jadi KOSONG setelah diangkut: volume & berat = 0, alert FULL
+ * di-resolve, cache Redis dibersihkan, lalu broadcast supaya dashboard ikut update.
+ * @param {{id:string, nodeId:string, areaId?:string}} bin
+ */
+async function resetBinAfterPickup(bin) {
+    // 1. Catat sensorLog baru bernilai 0 (jadi "berat/isi terakhir" = kosong)
+    await prisma.sensorLog.create({
+        data: { binId: bin.id, weight: 0, volume: 0, battery: 0, gas: null, distance: null, rssi: -999 },
+    });
+
+    // 2. Resolve semua alert aktif bin ini (FULL_VOLUME / FULL_WEIGHT / GAS dll)
+    const resolved = await resolveAllAlertsForBin(bin.id);
+
+    // 3. Bersihkan cache Redis (latest reading + berat terkonfirmasi + pending)
+    if (redisClient) {
+        try {
+            await redisClient.del(`bin:${bin.nodeId}:latest`);
+            await redisClient.del(`bin:${bin.id}:weight`);
+            await redisClient.del(`bin:${bin.id}:pendingWeight`);
+        } catch { /* ignore */ }
+    }
+    await setConfirmedWeight(bin.id, 0);
+
+    // 4. Beritahu dashboard (kapasitas balik 0)
+    broadcast('BIN_UPDATE', {
+        nodeId: bin.nodeId, binId: bin.id,
+        weight: 0, volume: 0, fillPct: 0, fillLabel: 'KOSONG',
+        battery: 0, gas: null, distance: null, rssi: -999,
+        timestamp: new Date(),
+    });
+
+    logger.info(`[PickupService] 🧹 Tong ${bin.nodeId} di-reset KOSONG (alert resolved: ${resolved})`);
+}
 
 /**
  * Auto-update status jadwal petugas berdasarkan aktivitas pickup.
@@ -64,7 +102,12 @@ export async function completePickup(binId, user, { lat, lng } = {}) {
         completedLng: typeof lng === 'number' ? lng : null,
     });
 
-    logger.info(`[PickupService] ✅ ${user.email} menyelesaikan pickup bin ${bin.nodeId} (menunggu konfirmasi sensor)`);
+    // LANGKAH 1 (Angkut): masuk "Sedang Diproses" (MENUNGGU_SENSOR). Alert FULL
+    // langsung di-resolve supaya bin tidak nyangkut lagi di "Perlu Diangkut".
+    // Tong BELUM di-reset — itu dilakukan saat Konfirmasi Selesai (langkah 2).
+    await resolveAllAlertsForBin(bin.id);
+
+    logger.info(`[PickupService] 🚚 ${user.email} mulai angkut bin ${bin.nodeId} (sedang diproses)`);
 
     broadcast('PICKUP_COMPLETED', {
         pickupId: pickup.id,
@@ -129,20 +172,17 @@ export async function manualConfirmPickup(id, user) {
 
     const updated = await confirmPickupManual(pickup.id, user.id);
 
-    logger.info(`[PickupService] ✋ ${user.email} mengonfirmasi MANUAL pickup bin ${updated.bin?.nodeId ?? updated.binId} SELESAI (pickup ${updated.id})`);
-
-    // Resolve alert "penuh" yang nyangkut (sensor mungkin error & tak auto-resolve),
-    // supaya badge/notifikasi admin ikut bersih. Kumpulkan dari alertId pickup + alert aktif.
-    const alertIds = new Set();
-    if (pickup.alertId) alertIds.add(pickup.alertId);
-    const activeVol = await findActiveAlert(updated.binId, 'FULL_VOLUME');
-    const activeWt  = await findActiveAlert(updated.binId, 'FULL_WEIGHT');
-    if (activeVol) alertIds.add(activeVol.id);
-    if (activeWt) alertIds.add(activeWt.id);
-    for (const alertId of alertIds) {
-        await resolveAlert(alertId).catch((e) => logger.warn(`[PickupService] gagal resolve alert ${alertId}: ${e.message}`));
-        broadcast('ALERT_RESOLVED', { alertId, nodeId: updated.bin?.nodeId, binId: updated.binId, type: 'FULL_VOLUME' });
+    // LANGKAH 2 (Konfirmasi Selesai): tong di-reset KOSONG (volume/berat 0) +
+    // pastikan alert resolved + cache dibersihkan.
+    if (updated.bin?.id || updated.binId) {
+        await resetBinAfterPickup({
+            id: updated.binId,
+            nodeId: updated.bin?.nodeId ?? '',
+            areaId: updated.areaId,
+        });
     }
+
+    logger.info(`[PickupService] ✋ ${user.email} mengonfirmasi pickup bin ${updated.bin?.nodeId ?? updated.binId} SELESAI + tong di-reset`);
 
     broadcast('PICKUP_CONFIRMED', {
         pickupId: updated.id,

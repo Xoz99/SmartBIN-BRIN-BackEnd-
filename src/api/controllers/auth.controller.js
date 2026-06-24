@@ -1,6 +1,15 @@
-import { login, changePassword } from '../../services/auth.service.js';
+import { login, register, changePassword } from '../../services/auth.service.js';
 import { getUserById } from '../../services/user.service.js';
 import { success, error } from '../../utils/response.js';
+
+export async function registerController(req, res) {
+    try {
+        const { token, user } = await register(req.body);
+        return success(res, { token, user }, 'Registrasi berhasil', 201);
+    } catch (err) {
+        return error(res, err.message, err.statusCode || 400);
+    }
+}
 
 export async function loginController(req, res) {
     try {

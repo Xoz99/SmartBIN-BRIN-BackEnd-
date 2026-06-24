@@ -1,8 +1,26 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { findUserByEmail, findUserById } from '../models/user.model.js';
+import { findUserByEmail, findUserById, createUser } from '../models/user.model.js';
 import { prisma } from '../config/db.js';
 import { env } from '../config/env.js';
+
+function signToken(user) {
+    const payload = { id: user.id, email: user.email, role: user.role, areaId: user.areaId ?? null };
+    return jwt.sign(payload, env.JWT_SECRET, { expiresIn: env.JWT_EXPIRES_IN });
+}
+
+/**
+ * Register publik — buat user WARGA baru, langsung kasih token
+ * @param {{name:string, email:string, password:string}} data
+ */
+export async function register({ name, email, password }) {
+    const existing = await findUserByEmail(email);
+    if (existing) throw Object.assign(new Error('Email sudah terdaftar'), { statusCode: 409 });
+
+    const hashed = await hashPassword(password);
+    const user = await createUser({ name, email, password: hashed, role: 'WARGA' });
+    return { token: signToken(user), user };
+}
 
 /**
  * Login — verify credentials and return JWT

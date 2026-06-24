@@ -6,6 +6,12 @@ logs/
 # Firebase credentials
 firebase-credentials.json
 
+# Sertifikat HTTPS self-signed (untuk kamera HP)
+cert.pem
+key.pem
+venv/
+.venv/
+
 # Python
 classify/__pycache__/
 classify/.venv/

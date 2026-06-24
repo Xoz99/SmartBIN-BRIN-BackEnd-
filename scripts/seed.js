@@ -119,7 +119,6 @@ async function main() {
                     volume: parseFloat((Math.random() * 80).toFixed(2)),
                     battery: parseFloat((60 + Math.random() * 40).toFixed(2)),
                     rssi: -Math.floor(60 + Math.random() * 30),
-                    wasteType: ['organik', 'anorganik', 'b3'][Math.floor(Math.random() * 3)],
                     createdAt: ts,
                 },
             });

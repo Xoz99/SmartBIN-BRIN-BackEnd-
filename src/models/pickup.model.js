@@ -49,10 +49,7 @@ export async function findAllPickups(user, { status, binId } = {}, limit = 50, p
     const where = {};
     if (status) where.status = status;
     if (binId) where.binId = binId;
-
-    if (user && user.role === 'PETUGAS' && user.areaId) {
-        where.areaId = user.areaId;
-    }
+    // Filter area petugas dinonaktifkan — petugas melihat semua pickup.
 
     const skip = (page - 1) * limit;
     const [items, total] = await Promise.all([

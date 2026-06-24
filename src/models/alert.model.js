@@ -18,10 +18,7 @@ export async function createAlert(data) {
 export async function findAllAlerts(user, { resolved } = {}, limit = 50, page = 1) {
     const where = {};
     if (typeof resolved !== 'undefined') where.resolved = resolved;
-
-    if (user && user.role === 'PETUGAS' && user.areaId) {
-        where.bin = { areaId: user.areaId };
-    }
+    // Filter area petugas dinonaktifkan — petugas melihat semua alert.
 
     const skip = (page - 1) * limit;
     const [items, total] = await Promise.all([
@@ -60,6 +57,19 @@ export async function resolveAlert(id) {
         where: { id },
         data: { resolved: true, resolvedAt: new Date() },
     });
+}
+
+/**
+ * Tandai SEMUA alert aktif untuk satu bin jadi resolved (dipakai saat pickup selesai).
+ * @param {string} binId
+ * @returns {Promise<number>} jumlah alert yang diselesaikan
+ */
+export async function resolveAllAlertsForBin(binId) {
+    const res = await prisma.alert.updateMany({
+        where: { binId, resolved: false },
+        data: { resolved: true, resolvedAt: new Date() },
+    });
+    return res.count;
 }
 
 /**
