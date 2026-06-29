@@ -9,29 +9,35 @@ Core Server Configuration
 # ==================================================
 
 PROJECT_NAME = "Core Server Monitor"
-VERSION = "0.5.0"
-DEBUG = True
+VERSION      = "0.5.0"
+DEBUG        = True
 
 # ==================================================
 # DASHBOARD
 # ==================================================
 
-REFRESH_RATE = 2
+REFRESH_RATE  = 2
 MAX_LOG_LINES = 20
 
 # ==================================================
 # MQTT
 # ==================================================
 
-MQTT_BROKER = "100.99.74.71"      # Ganti sesuai IP lokal server
-MQTT_PORT = 1883
-MQTT_TOPIC = "raspi/wifi"
-
+MQTT_BROKER    = "4b1ed76fd60640648c995b6c90f11829.s1.eu.hivemq.cloud"
+MQTT_PORT      = 8883
+MQTT_TOPIC     = "smartbin/#"   # wildcard semua node
 MQTT_CLIENT_ID = "core_server"
 MQTT_KEEPALIVE = 60
+MQTT_USERNAME  = "bintrash"
+MQTT_PASSWORD  = "Smartbinbrin1"
 
-MQTT_USERNAME = "brin"
-MQTT_PASSWORD = "brin"
+# ==================================================
+# SMARTBIN NODES
+# ==================================================
+
+VALID_NODE_IDS    = ["bin-001", "bin-002", "bin-003"]
+MQTT_TOPIC_SENSOR = "smartbin/{node_id}/sensor"
+MQTT_TOPIC_STATUS = "smartbin/{node_id}/status"
 
 # ==================================================
 # WIFI
@@ -49,8 +55,8 @@ LORA_TIMEOUT = 5
 # WARNING THRESHOLD
 # ==================================================
 
-CPU_WARNING = 80
-RAM_WARNING = 80
+CPU_WARNING  = 80
+RAM_WARNING  = 80
 TEMP_WARNING = 70
 
 # ==================================================

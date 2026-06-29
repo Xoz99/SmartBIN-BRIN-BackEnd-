@@ -5,6 +5,8 @@ WiFi Manager
 Controller untuk seluruh data Raspberry Pi A (WiFi).
 """
 
+import time
+
 from dashboard.state import state
 from logger.log_manager import logger
 from network.wifi_statistics import wifi_statistics
@@ -14,7 +16,9 @@ class WiFiManager:
 
     def process_payload(self, payload, payload_size):
 
-        sequence = payload.get("seq")
+        receive_time = time.time()   # catat waktu terima di sisi Windows
+
+        sequence  = payload.get("seq")
         timestamp = payload.get("timestamp")
 
         # ============================================
@@ -34,6 +38,7 @@ class WiFiManager:
             payload_size=payload_size,
             sequence=sequence,
             timestamp=timestamp,
+            receive_time=receive_time,
         )
 
         # ============================================
