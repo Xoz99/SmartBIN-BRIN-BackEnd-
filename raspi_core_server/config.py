@@ -23,15 +23,15 @@ MAX_LOG_LINES = 20
 # MQTT
 # ==================================================
 
-MQTT_BROKER = "0.0.0.0"      # Ganti sesuai IP lokal server
+MQTT_BROKER = "100.99.74.71"      # Ganti sesuai IP lokal server
 MQTT_PORT = 1883
 MQTT_TOPIC = "raspi/wifi"
 
 MQTT_CLIENT_ID = "core_server"
 MQTT_KEEPALIVE = 60
 
-MQTT_USERNAME = ""
-MQTT_PASSWORD = ""
+MQTT_USERNAME = "brin"
+MQTT_PASSWORD = "brin"
 
 # ==================================================
 # WIFI
