@@ -2,7 +2,7 @@ import time
 
 from rich.live import Live
 
-from config import REFRESH_RATE
+from config import REFRESH_RATE, API_POLL_ENABLED
 
 from dashboard.layout import make_layout
 from dashboard.display import (
@@ -19,6 +19,7 @@ from logger.log_manager import logger
 
 from network.mqtt_client import mqtt_client
 from network.wifi_statistics import wifi_statistics
+from network.api_client import api_client
 
 
 layout = make_layout()
@@ -45,7 +46,13 @@ with Live(
         # ===================================
 
         update_system_state()
-        wifi_statistics.update()
+
+        # Byterate/throughput: ambil dari backend API (titik ukur MQTT sebenarnya).
+        # Fallback ke perhitungan MQTT lokal kalau API dimatikan di config.
+        if API_POLL_ENABLED:
+            api_client.poll()
+        else:
+            wifi_statistics.update()
 
         # ===================================
         # UPDATE UI

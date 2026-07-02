@@ -3,6 +3,7 @@ import { ALL_TOPICS, parseNodeId, getTopicType } from './topics.js';
 import { handleSensorData } from './handlers/sensorData.js';
 import { handleStatusData } from './handlers/statusData.js';
 import { handleImageData } from './handlers/imageData.js';
+import { transmissionStats } from './transmissionStats.js';
 import { logger } from '../utils/logger.js';
 
 export async function startMqttSubscriber() {
@@ -35,7 +36,14 @@ export async function startMqttSubscriber() {
             payload = message.toString();
         }
 
-        logger.debug(`[MQTT] ← ${topic} | nodeId=${nodeId} | type=${type}`);
+        // Catat byterate transmisi dari ukuran payload asli (byte yang benar-benar
+        // ditransmisikan). seq/timestamp diambil dari payload bila JSON valid.
+        transmissionStats.record(nodeId, message.length, {
+            seq: typeof payload === 'object' ? payload?.seq : null,
+            timestamp: typeof payload === 'object' ? payload?.timestamp : null,
+        });
+
+        logger.debug(`[MQTT] ← ${topic} | nodeId=${nodeId} | type=${type} | ${message.length}B`);
 
         switch (type) {
             case 'sensor':

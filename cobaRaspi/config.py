@@ -20,6 +20,16 @@ REFRESH_RATE  = 2
 MAX_LOG_LINES = 20
 
 # ==================================================
+# BACKEND API (Core Server)
+# ==================================================
+# CLI mengambil metrik byterate/throughput transmisi dari backend lewat HTTP.
+# Backend = titik terima MQTT sebenarnya, jadi byterate diukur di sana.
+
+BACKEND_API_URL  = "http://localhost:3000"
+API_POLL_ENABLED = True      # False = kembali pakai perhitungan MQTT lokal
+API_TIMEOUT      = 2         # detik
+
+# ==================================================
 # MQTT
 # ==================================================
 
