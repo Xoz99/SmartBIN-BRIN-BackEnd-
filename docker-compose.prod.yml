@@ -19,7 +19,10 @@ services:
       POSTGRES_DB: smartbin_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    # TIDAK expose ke publik — cuma dipakai backend lewat jaringan internal compose.
+    # Bind ke localhost VPS SAJA (127.0.0.1) — TIDAK publik. Buat akses GUI lewat
+    # SSH tunnel: `ssh -L 5433:localhost:5432 root@<VPS>` lalu konek ke localhost:5433.
+    ports:
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U smartbin -d smartbin_db"]
       interval: 10s
