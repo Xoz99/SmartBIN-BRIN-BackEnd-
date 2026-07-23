@@ -18,6 +18,41 @@ async function safeRedisGet(key) {
     }
 }
 
+/**
+ * Batas umur (detik) sebelum bacaan sensor dianggap BASI (stale).
+ * Default = ambang offline (30 dtk): kalau tong tidak kirim pesan lebih lama dari
+ * ini, angka terakhir (mis. baterai) sudah tidak live → FE jangan tampilkan
+ * sebagai nilai terkini. Bisa dibedakan lewat env BIN_STALE_GAP_SEC.
+ */
+const STALE_GAP_SEC = Number(
+    process.env.BIN_STALE_GAP_SEC ?? process.env.BIN_OFFLINE_GAP_SEC ?? 30
+);
+
+/**
+ * Hitung kesegaran data dari bacaan terbaru yang tersedia (Redis latest ATAU
+ * sensorLog terakhir di DB — mana yang paling baru).
+ * @param {object|null} latest  objek latest hasil parse Redis (punya .timestamp)
+ * @param {Date|string|null} dbLatestAt  createdAt sensorLog terbaru dari DB
+ * @param {string|null} lastSeen  ISO string Redis lastSeen
+ * @returns {{ lastReadingAt: string|null, ageSec: number|null, stale: boolean }}
+ */
+function computeFreshness(latest, dbLatestAt, lastSeen) {
+    const times = [latest?.timestamp, dbLatestAt, lastSeen]
+        .map((t) => (t ? new Date(t).getTime() : NaN))
+        .filter((n) => Number.isFinite(n));
+
+    if (times.length === 0) {
+        return { lastReadingAt: null, ageSec: null, stale: true };
+    }
+    const newest = Math.max(...times);
+    const ageSec = Math.round((Date.now() - newest) / 1000);
+    return {
+        lastReadingAt: new Date(newest).toISOString(),
+        ageSec,
+        stale: ageSec > STALE_GAP_SEC,
+    };
+}
+
 export async function getAllBins(user) {
     const bins = await findAllBins(user);
 
@@ -28,11 +63,22 @@ export async function getAllBins(user) {
                 safeRedisGet(`bin:${bin.nodeId}:status`),
                 safeRedisGet(`bin:${bin.nodeId}:lastSeen`),
             ]);
+            const latestObj = latest ? JSON.parse(latest) : null;
+            const fresh = computeFreshness(
+                latestObj,
+                bin.sensorLogs?.[0]?.createdAt ?? null,
+                lastSeen,
+            );
             return {
                 ...bin,
                 status: status || 'offline',
                 lastSeen: lastSeen || null,
-                latest: latest ? JSON.parse(latest) : null,
+                latest: latestObj,
+                // Kesegaran data: stale=true → bacaan terakhir (mis. baterai)
+                // sudah lebih tua dari BIN_STALE_GAP_SEC, jangan ditampilkan live.
+                stale: fresh.stale,
+                lastReadingAt: fresh.lastReadingAt,
+                dataAgeSec: fresh.ageSec,
             };
         })
     );
@@ -48,17 +94,25 @@ export async function getBinById(id) {
     const bin = await findBinById(id);
     if (!bin) return null;
 
-    const [latest, status] = await Promise.all([
+    const [latest, status, lastSeen, dbLatest] = await Promise.all([
         safeRedisGet(`bin:${bin.nodeId}:latest`),
         safeRedisGet(`bin:${bin.nodeId}:status`),
+        safeRedisGet(`bin:${bin.nodeId}:lastSeen`),
+        findLatestByBinId(bin.id),
     ]);
 
     const threshold = await getBinThreshold(bin.nodeId);
+    const latestObj = latest ? JSON.parse(latest) : null;
+    const fresh = computeFreshness(latestObj, dbLatest?.createdAt ?? null, lastSeen);
 
     return {
         ...bin,
         status: status || 'offline',
-        latest: latest ? JSON.parse(latest) : null,
+        lastSeen: lastSeen || null,
+        latest: latestObj,
+        stale: fresh.stale,
+        lastReadingAt: fresh.lastReadingAt,
+        dataAgeSec: fresh.ageSec,
         threshold,
     };
 }

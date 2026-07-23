@@ -36,6 +36,10 @@ export const env = {
 
   CLASSIFY_SERVICE_URL: process.env.CLASSIFY_SERVICE_URL || 'http://localhost:8000',
 
+  // Shared secret untuk device (raspi) push hasil klasifikasi via HTTP.
+  // Kosong = endpoint POST /classifications terbuka (hanya untuk dev lokal).
+  DEVICE_INGEST_KEY: process.env.DEVICE_INGEST_KEY || '',
+
   CORS_ORIGIN: process.env.CORS_ORIGIN || '',
 
   // Default thresholds (can be overridden per-bin via Redis)
@@ -43,4 +47,13 @@ export const env = {
   DEFAULT_VOLUME_THRESHOLD: parseFloat(process.env.DEFAULT_VOLUME_THRESHOLD) || 85,   // %
   DEFAULT_BATTERY_THRESHOLD: parseFloat(process.env.DEFAULT_BATTERY_THRESHOLD) || 20, // %
   DEFAULT_GAS_THRESHOLD: parseFloat(process.env.DEFAULT_GAS_THRESHOLD) || 300,       // ppm
+
+  // Ambang tingkat CRITICAL (dokumentasi hardware §6 & §8).
+  // Tingkat WARNING pakai threshold di atas (bisa dioverride per-tong).
+  VOLUME_CRITICAL_THRESHOLD: parseFloat(process.env.VOLUME_CRITICAL_THRESHOLD) || 100, // % — tong penuh
+  BATTERY_VOLTAGE_WARNING: parseFloat(process.env.BATTERY_VOLTAGE_WARNING) || 10.2,    // V — "Baterai Hampir Habis"
+  BATTERY_VOLTAGE_CRITICAL: parseFloat(process.env.BATTERY_VOLTAGE_CRITICAL) || 9.6,   // V — alert darurat
+  // Histeresis: alert baterai baru dianggap pulih di atas ambang ini (bukan tepat
+  // di 10.2V), supaya tegangan yang naik-turun tidak bikin alert nyala-mati terus.
+  BATTERY_VOLTAGE_RECOVERY: parseFloat(process.env.BATTERY_VOLTAGE_RECOVERY) || 10.5,  // V
 };

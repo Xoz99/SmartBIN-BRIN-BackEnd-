@@ -3,6 +3,7 @@ import { ALL_TOPICS, parseNodeId, getTopicType } from './topics.js';
 import { handleSensorData } from './handlers/sensorData.js';
 import { handleStatusData } from './handlers/statusData.js';
 import { handleImageData } from './handlers/imageData.js';
+import { handleClassificationData } from './handlers/classificationData.js';
 import { logger } from '../utils/logger.js';
 
 export async function startMqttSubscriber() {
@@ -53,6 +54,12 @@ export async function startMqttSubscriber() {
             case 'image':
                 await handleImageData(nodeId, payload).catch((err) =>
                     logger.error(`[MQTT] imageData handler error (${nodeId}):`, err.message)
+                );
+                break;
+
+            case 'classification':
+                await handleClassificationData(nodeId, payload).catch((err) =>
+                    logger.error(`[MQTT] classificationData handler error (${nodeId}):`, err.message)
                 );
                 break;
 

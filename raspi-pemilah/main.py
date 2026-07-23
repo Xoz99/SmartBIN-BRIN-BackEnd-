@@ -34,6 +34,13 @@ else:
 import serial
 import serial.tools.list_ports
 
+# Muat raspi-pemilah/.env (opsional) supaya konfigurasi MQTT bisa ditaruh di file.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except ImportError:
+    pass
+
 app = FastAPI(title="EcoSort AI Backend")
 
 app.add_middleware(
@@ -58,6 +65,111 @@ ARDUINO_CMD = {
     "Anorganik": "anorganik",
     "B3":        "B3",
 }
+
+# ============================================================
+# MQTT — kirim hasil pemilahan ke backend SmartBIN (opsional).
+# Device auth lewat broker (username/password) + nodeId di topik — BUKAN login.
+# Set di raspi-pemilah/.env: MQTT_BROKER_URL, MQTT_USERNAME, MQTT_PASSWORD, NODE_ID
+# ============================================================
+import json
+import ssl as _ssl
+from urllib.parse import urlparse
+
+MQTT_BROKER_URL = os.environ.get("MQTT_BROKER_URL", "")
+MQTT_USERNAME   = os.environ.get("MQTT_USERNAME", "")
+MQTT_PASSWORD   = os.environ.get("MQTT_PASSWORD", "")
+NODE_ID         = os.environ.get("NODE_ID", "bin-001")
+
+# Alternatif/cadangan MQTT: push hasil pemilahan ke backend lewat HTTP.
+# Set BACKEND_HTTP_URL=https://host:port (mis. http://192.168.1.10:3000) untuk mengaktifkan.
+# DEVICE_INGEST_KEY harus sama dengan env DEVICE_INGEST_KEY di backend.
+BACKEND_HTTP_URL  = os.environ.get("BACKEND_HTTP_URL", "")
+DEVICE_INGEST_KEY = os.environ.get("DEVICE_INGEST_KEY", "")
+
+# Label model (kapital) → enum backend (lowercase, "B3" → "b3")
+MQTT_LABEL_MAP = {"Organik": "organik", "Anorganik": "anorganik", "B3": "b3"}
+
+_mqtt_client = None
+
+def _init_mqtt():
+    global _mqtt_client
+    if not MQTT_BROKER_URL:
+        print("[MQTT] MQTT_BROKER_URL belum di-set — hasil pemilahan TIDAK dikirim ke backend.")
+        return
+    try:
+        import paho.mqtt.client as mqtt
+    except ImportError:
+        print("[MQTT] paho-mqtt belum terpasang. Jalankan: pip install paho-mqtt")
+        return
+    u = urlparse(MQTT_BROKER_URL)
+    host = u.hostname
+    port = u.port or (8883 if u.scheme in ("mqtts", "ssl") else 1883)
+    cid = f"raspi-{NODE_ID}-{os.getpid()}"
+    try:
+        # paho-mqtt 2.x: wajib pilih versi callback API
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=cid)
+    except (AttributeError, TypeError):
+        client = mqtt.Client(client_id=cid)  # paho-mqtt 1.x
+    if MQTT_USERNAME:
+        client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+    if u.scheme in ("mqtts", "ssl") or port == 8883:
+        client.tls_set(cert_reqs=_ssl.CERT_REQUIRED)  # broker cloud (mis. HiveMQ) butuh TLS
+    client.on_connect = lambda *a: print(f"[MQTT] Terhubung ke {host}:{port} sebagai {NODE_ID}")
+    try:
+        client.connect_async(host, port, keepalive=60)
+        client.loop_start()  # thread background, auto-reconnect
+        _mqtt_client = client
+    except Exception as e:
+        print(f"[MQTT] Gagal konek: {e}")
+
+def _report_http(label: str, confidence: float):
+    """Push hasil pemilah ke backend lewat HTTP → POST {BACKEND_HTTP_URL}/classifications.
+
+    Dijalankan di thread terpisah supaya tidak memblok loop kamera / endpoint.
+    Pakai stdlib urllib (tanpa dependensi tambahan).
+    """
+    if not BACKEND_HTTP_URL:
+        return
+    url = BACKEND_HTTP_URL.rstrip("/") + "/classifications"
+    body = json.dumps({
+        "nodeId": NODE_ID,
+        "label": label,
+        "confidence": float(confidence),
+    }).encode("utf-8")
+
+    def _send():
+        import urllib.request
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        if DEVICE_INGEST_KEY:
+            req.add_header("X-Device-Key", DEVICE_INGEST_KEY)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                print(f"[HTTP] → {url} {r.status}")
+        except Exception as e:
+            print(f"[HTTP] gagal POST: {e}")
+
+    threading.Thread(target=_send, daemon=True).start()
+
+def report_classification(kategori: str, confidence: float):
+    """Lapor hasil pemilah ke backend via MQTT dan/atau HTTP (tergantung env)."""
+    label = MQTT_LABEL_MAP.get(kategori, "unknown")
+
+    # Jalur MQTT → smartbin/{NODE_ID}/classification
+    if _mqtt_client is not None:
+        topic = f"smartbin/{NODE_ID}/classification"
+        payload = json.dumps({"label": label, "confidence": float(confidence)})
+        try:
+            _mqtt_client.publish(topic, payload, qos=1)
+            print(f"[MQTT] → {topic} {payload}")
+        except Exception as e:
+            print(f"[MQTT] gagal publish: {e}")
+
+    # Jalur HTTP (alternatif/cadangan) → POST /classifications
+    _report_http(label, confidence)
+
+# Konek saat modul dimuat (mendukung `python main.py` maupun `uvicorn main:app`).
+_init_mqtt()
 
 STATIC_TIPS = {
     "Anorganik": (
@@ -290,6 +402,7 @@ class CameraWorker:
                         if kategori and conf >= CONF_THRESHOLD:
                             print(f"[CAM] ✓ {kategori} ({conf:.0%}) → kirim ke Arduino")
                             kirim_ke_arduino(kategori)
+                            report_classification(kategori, conf)  # lapor ke backend
                             self.last = {"kategori": kategori, "confidence": conf, "ts": now}
                         else:
                             print(f"[CAM] objek terdeteksi tapi confidence rendah ({conf:.0%}) — dilewati")
@@ -345,7 +458,7 @@ def prediksi_volume(kecamatan: str):
     return data
 
 # ================= GEMINI SETUP =================
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")  # WAJIB dari env var, jangan hardcode key
 gemini_client  = None
 tips_cache: dict[str, str] = {}
 
@@ -526,6 +639,7 @@ async def predict(file: UploadFile = File(...)):
 
         print(f"[+] Deteksi: {kategori} ({confidence:.1%})")
         terkirim = kirim_ke_arduino(kategori)
+        report_classification(kategori, confidence)  # lapor ke backend (kehitung di Analitik)
 
         return {
             "status": "success",

@@ -23,6 +23,10 @@ pillow==12.2.0
 # Serial ke ESP32 (USB)
 pyserial==3.5
 
+# Kirim hasil pemilahan ke backend SmartBIN via MQTT (+ baca konfigurasi .env)
+paho-mqtt==2.1.0
+python-dotenv==1.0.1
+
 # Gemini tips (opsional — endpoint /genai/*). Boleh dihapus kalau tak dipakai.
 google-genai==2.7.0
 google-auth==2.53.0

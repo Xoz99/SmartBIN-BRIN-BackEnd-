@@ -11,22 +11,35 @@ import { logger } from '../utils/logger.js';
 //  'user'            -> berat dari input manual user di /ecosort (sistem lama).
 //                       [HAPUS saat full-sensor]
 //
-//  'sensor_pairing'  -> [AKTIF SEKARANG] URUTAN FISIK: JENIS DIDETEKSI DULU,
-//                       BERAT MENYUSUL. Kamera klasifikasi jenis sampah ->
-//                       label ditahan sebagai "pending label" (TTL window) di
-//                       Redis -> saat load cell kirim BERAT via MQTT sensor ->
-//                       label pending + berat dipasangkan -> deposit OTOMATIS
-//                       dibuat + jadi berat tong terkonfirmasi. Kalau berat
-//                       telat (> window) -> pending label hangus.
+//  'sensor_pairing'  -> URUTAN FISIK: JENIS DIDETEKSI DULU, BERAT MENYUSUL.
+//                       Kamera klasifikasi jenis sampah -> label ditahan
+//                       sebagai "pending label" (TTL window) di Redis -> saat
+//                       load cell kirim BERAT via MQTT sensor -> label pending +
+//                       berat dipasangkan -> deposit OTOMATIS dibuat + jadi berat
+//                       tong terkonfirmasi. Kalau berat telat (> window) ->
+//                       pending label hangus.
+//
+//  'accumulate'      -> [AKTIF SEKARANG] BERAT TONG = TOTAL BERJALAN. Tiap
+//                       penimbangan (berat naik lalu balik ~0 = 1 episode)
+//                       dijumlahkan ke total, pakai berat PUNCAK episode supaya
+//                       tidak double-count walau sensor publish tiap 5 detik.
+//                       Total naik terus selama sampah masuk, reset 0 saat tong
+//                       diangkut (pickup). Kalau kamera sempat klasifikasi jenis
+//                       pada episode itu -> deposit ikut dibuat.
 // =====================================================================
 export const WEIGHT_MODE = process.env.WEIGHT_MODE || 'sensor_pairing';
 
 // Lama window konfirmasi (detik). TTL Redis = auto-hangus.
 export const PAIRING_TTL_SEC = parseInt(process.env.WEIGHT_PAIRING_TTL, 10) || 10;
 
+// Ambang "timbangan kosong" (kg). Bacaan <= nilai ini dianggap 0 (noise load
+// cell tanpa tare). Dipakai mode 'accumulate' untuk mendeteksi awal/akhir episode.
+export const ZERO_THRESHOLD_KG = parseFloat(process.env.WEIGHT_ZERO_THRESHOLD) || 0.05;
+
 const pendingKey      = (binId) => `bin:${binId}:pendingWeight`;  // berat menunggu konfirmasi (mode lama)
 const pendingLabelKey = (binId) => `bin:${binId}:pendingLabel`;   // jenis sampah menunggu berat (sensor_pairing)
-const confirmedKey    = (binId) => `bin:${binId}:weight`;         // berat tong terkonfirmasi terakhir
+const confirmedKey    = (binId) => `bin:${binId}:weight`;         // berat tong terkonfirmasi / total berjalan
+const weighPeakKey    = (binId) => `bin:${binId}:weighPeak`;      // berat puncak episode timbang berjalan (accumulate)
 
 // ── Pending weight (sensor kirim, belum dikonfirmasi user) ──────────────
 export async function setPendingWeight(binId, weight) {
@@ -99,4 +112,47 @@ export async function getConfirmedWeight(binId) {
         const v = await redisClient.get(confirmedKey(binId));
         return v == null ? 0 : parseFloat(v);
     } catch { return 0; }
+}
+
+// ── Akumulasi berat (mode 'accumulate') ─────────────────────────────────
+// Bersihkan sisa episode timbang berjalan (dipanggil saat tong diangkut).
+export async function clearWeighEpisode(binId) {
+    if (!redisClient) return;
+    try { await redisClient.del(weighPeakKey(binId)); } catch { /* ignore */ }
+}
+
+/**
+ * Catat satu bacaan load cell dan deteksi apakah 1 penimbangan sudah SELESAI.
+ *
+ * Load cell reset ke ~0 antar item, jadi tiap barang = satu episode: berat
+ * NAIK di atas ambang lalu BALIK ~0. Selama berat di atas ambang, kita simpan
+ * nilai PUNCAK episode. Begitu berat balik ~0, puncak itu = berat item yang
+ * baru ditimbang → dijumlahkan sekali ke total (INCRBYFLOAT). Karena hanya
+ * di-commit saat balik ke 0, sensor yang publish tiap 5 detik tidak double-count.
+ *
+ * @param {string} binId
+ * @param {number} rawWeight berat live dari load cell (kg)
+ * @returns {Promise<{committed:boolean, added?:number, total?:number}>}
+ *   committed=true berarti 1 penimbangan baru saja masuk ke total.
+ */
+export async function recordWeighing(binId, rawWeight) {
+    if (!redisClient) return { committed: false };
+    const w = Number(rawWeight) || 0;
+    try {
+        if (w > ZERO_THRESHOLD_KG) {
+            // Masih ada barang di timbangan → update puncak episode ini.
+            const prevPeak = parseFloat(await redisClient.get(weighPeakKey(binId))) || 0;
+            if (w > prevPeak) await redisClient.set(weighPeakKey(binId), String(w));
+            return { committed: false };
+        }
+        // Timbangan balik ~0 → kalau ada puncak, episode selesai = 1 penimbangan.
+        const peak = parseFloat(await redisClient.get(weighPeakKey(binId))) || 0;
+        if (peak <= ZERO_THRESHOLD_KG) return { committed: false };
+        await redisClient.del(weighPeakKey(binId));
+        const total = parseFloat(await redisClient.incrbyfloat(confirmedKey(binId), peak));
+        return { committed: true, added: peak, total };
+    } catch (e) {
+        logger.warn(`[weightMode] gagal recordWeighing: ${e.message}`);
+        return { committed: false };
+    }
 }

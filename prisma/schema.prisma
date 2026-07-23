@@ -51,9 +51,19 @@ model SensorLog {
   weight  Float // kg
   volume  Float // percentage 0–100
   battery Float // percentage 0–100
+  batteryVoltage Float? // V — tegangan baterai (3S Li-Ion 9.0–12.6V) via INA219
   gas      Float? // ppm — gas sensor reading (MQ-x)
   distance Float? // cm — VL53L0X laser distance sensor (fill level)
-  rssi     Int    // dBm signal strength
+  rssi     Int    // dBm signal strength (LoRa link)
+  snr      Float? // dB — LoRa signal-to-noise ratio (dari board RX [RF IN])
+  packetLen Int?  // bytes — panjang paket RF diterima (metrik penelitian LoRa)
+
+  // ── Perbandingan komunikasi LoRa vs HTTP/internet (penelitian) ──
+  transport String? // "lora" | "http" — jalur data sampai ke backend
+  seq       Int?    // nomor urut paket dari device (deteksi packet loss)
+  sentAt    DateTime? // jam device saat kirim (untuk hitung latency)
+  latencyMs Int?    // ms — createdAt(backend) − sentAt(device); offset jam saling hilang saat dibandingkan
+  throughputBps Float? // bit/detik — throughput jalur (LoRa: dari airtime RF; HTTP: size/latency), diukur di gateway
 
   createdAt DateTime @default(now())
 
@@ -72,12 +82,20 @@ enum AlertType {
   GAS_HIGH
 }
 
+/// Tingkat keparahan alert (lihat dokumentasi hardware §6 & §8):
+/// volume >= 90% / baterai < 10.2V → WARNING; volume 100% / baterai < 9.6V → CRITICAL
+enum AlertSeverity {
+  WARNING
+  CRITICAL
+}
+
 model Alert {
   id    String @id @default(cuid())
   binId String
   bin   Bin    @relation(fields: [binId], references: [id], onDelete: Cascade)
 
   type     AlertType
+  severity AlertSeverity @default(WARNING)
   message  String
   resolved Boolean   @default(false)
 
@@ -86,6 +104,7 @@ model Alert {
 
   @@index([binId])
   @@index([resolved])
+  @@index([severity])
   @@map("alerts")
 }
 

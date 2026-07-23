@@ -6,6 +6,7 @@ export const TOPICS = {
     SENSOR: 'smartbin/+/sensor',
     STATUS: 'smartbin/+/status',
     IMAGE: 'smartbin/+/image',
+    CLASSIFICATION: 'smartbin/+/classification',
 };
 
 export const ALL_TOPICS = Object.values(TOPICS);

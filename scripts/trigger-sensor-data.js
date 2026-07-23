@@ -1,124 +1,98 @@
-import { PrismaClient } from '@prisma/client';
-import { handleSensorData } from '../src/mqtt/handlers/sensorData.js';
-import { handleStatusData } from '../src/mqtt/handlers/statusData.js';
+/**
+ * One-shot MQTT sensor trigger ke broker Mosquitto lokal.
+ *
+ * Nembak SATU payload sensor ke broker (default 192.168.0.101) lalu keluar.
+ * Beda sama simulate-mqtt.js yg loop terus — ini sekali tembak buat ngetes cepat.
+ *
+ * Topic   : smartbin/{nodeId}/sensor   (lihat src/mqtt/topics.js)
+ * Payload : { weight, volume, battery, gas, distance, lat, lng, rssi }
+ *           semua field opsional — cocok dengan SensorPayloadSchema di handler.
+ *
+ * Contoh:
+ *   node scripts/trigger-sensor-data.js
+ *   node scripts/trigger-sensor-data.js bin-001 --weight 12.5 --volume 80
+ *   node scripts/trigger-sensor-data.js bin-002 --distance 8 --battery 95 --gas 120
+ *   node scripts/trigger-sensor-data.js bin-003 --broker mqtt://192.168.0.101:1883
+ *
+ * Flag: --weight --volume --battery --gas --distance --lat --lng --rssi --broker
+ */
+
+import mqtt from 'mqtt';
 import { config } from 'dotenv';
-import { redisClient, connectRedis } from '../src/config/redis.js';
 
 config();
 
-const prisma = new PrismaClient();
+// Broker default → IP lokal Mosquitto. Override lewat env MQTT_BROKER_URL atau flag --broker.
+const DEFAULT_BROKER = 'mqtt://192.168.0.101:1883';
 
-async function run() {
-    // 0. Hubungkan ke Redis (agar redisClient ter-inisialisasi)
-    try {
-        await connectRedis();
-    } catch (e) {
-        console.warn('⚠️ Gagal terhubung ke Redis:', e.message);
-    }
-    // 1. Parsing Command Line Arguments (Contoh: node scripts/trigger-sensor-data.js bin-002 85)
-    const targetNodeId = process.argv[2];
-    const customVolume = process.argv[3] ? parseFloat(process.argv[3]) : null;
+// --- Parse argumen CLI ---------------------------------------------------
+const args = process.argv.slice(2);
+const NUMERIC_FLAGS = ['weight', 'volume', 'battery', 'gas', 'distance', 'lat', 'lng', 'rssi'];
 
-    let bin;
-    if (targetNodeId) {
-        bin = await prisma.bin.findUnique({ where: { nodeId: targetNodeId } });
-        if (!bin) {
-            console.error(`\n❌ Bin dengan Node ID "${targetNodeId}" tidak ditemukan.`);
-            console.log('\nDaftar Bin yang tersedia di database Anda:');
-            const allBins = await prisma.bin.findMany();
-            allBins.forEach((b) => {
-                console.log(`  👉 Node ID: "${b.nodeId}" | Location: "${b.location}"`);
-            });
-            console.log('\n💡 Gunakan salah satu Node ID di atas. Contoh: node scripts/trigger-sensor-data.js bin-002');
-            process.exit(1);
+let nodeId = 'bin-001';
+let brokerUrl = process.env.MQTT_BROKER_URL || DEFAULT_BROKER;
+const payload = {};
+
+for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--broker') {
+        brokerUrl = args[++i];
+    } else if (a.startsWith('--')) {
+        const key = a.slice(2);
+        const val = args[++i];
+        if (NUMERIC_FLAGS.includes(key)) {
+            payload[key] = Number(val);
+        } else {
+            console.warn(`[trigger] flag tidak dikenal: ${a} (diabaikan)`);
         }
     } else {
-        bin = await prisma.bin.findFirst();
-        if (!bin) {
-            console.error('❌ Tidak ada bin di database. Jalankan `npm run seed` terlebih dahulu.');
-            process.exit(1);
-        }
-        console.log(`\n💡 Info: Kamu menggunakan bin default pertama ("${bin.nodeId}").`);
-        console.log(`   Untuk mengecek bin lain, ketik Node ID-nya. Contoh: node scripts/trigger-sensor-data.js bin-002`);
-    }
-
-    // Tentukan volume (kapasitas) — default 75% jika tidak ditentukan
-    const targetVolume = customVolume !== null ? customVolume : 75.0;
-
-    console.log(`\n📌 Mensimulasikan Data Sensor Masuk untuk Bin:`);
-    console.log(`- ID: ${bin.id}`);
-    console.log(`- Node ID: ${bin.nodeId}`);
-    console.log(`- Location: ${bin.location}`);
-
-    // Input persentase kapasitas yang ingin kamu test
-    const payload = {
-        weight: targetVolume > 80 ? 48.5 : 35.2, // sesuaikan berat jika kapasitas tinggi
-        volume: targetVolume,
-        battery: 88.0,
-        gas: 120.0,
-        rssi: -65
-    };
-
-    console.log(`\n📡 Mengirim data telemetri ke handleSensorData():`);
-    console.log(JSON.stringify(payload, null, 2));
-
-    try {
-        // 2. Set status bin menjadi 'online' di Redis
-        await handleStatusData(bin.nodeId, { status: 'online' });
-
-        // 3. Panggil handler data sensor utama
-        await handleSensorData(bin.nodeId, payload);
-        
-        console.log('\n✅ Data sensor & Status berhasil diproses oleh Backend!');
-        console.log('  1. Status di-set ONLINE di Redis (TTL 3 menit)');
-        console.log('  2. Tersimpan di database PostgreSQL (tabel sensor_logs)');
-        console.log('  3. Tercache di Redis sebagai data terbaru');
-        console.log('  4. Pengecekan threshold & alert selesai');
-        console.log('  5. Broadcast terkirim via WebSocket');
-
-        // 4. Verifikasi apakah data terbaru berhasil ter-cache di Redis
-        try {
-            if (redisClient && redisClient.status === 'ready') {
-                const cached = await redisClient.get(`bin:${bin.nodeId}:latest`);
-                const statusCached = await redisClient.get(`bin:${bin.nodeId}:status`);
-                if (cached) {
-                    console.log(`\n🔴 Data di Redis Cache (Realtime):`);
-                    console.log(JSON.stringify(JSON.parse(cached), null, 2));
-                }
-                console.log(`🟢 Status Realtime di Redis Cache: "${statusCached}"`);
-            } else {
-                console.log('\n⚠️ Redis server mati atau belum terhubung. Kapasitas realtime di API /bins mungkin akan kosong/offline jika Redis tidak aktif.');
-            }
-        } catch (e) {
-            console.log('\n⚠️ Gagal membaca dari Redis:', e.message);
-        }
-
-        // 4. Verifikasi apakah log tersimpan di PostgreSQL
-        const latestLog = await prisma.sensorLog.findFirst({
-            where: { binId: bin.id },
-            orderBy: { createdAt: 'desc' },
-        });
-
-        if (latestLog) {
-            console.log(`\n🐘 Log Terakhir di PostgreSQL (SensorLog):`);
-            console.log(`  - Log ID: ${latestLog.id}`);
-            console.log(`  - Volume (Kapasitas): ${latestLog.volume}%`);
-            console.log(`  - Weight: ${latestLog.weight}kg`);
-            console.log(`  - Timestamp: ${latestLog.createdAt.toISOString()}`);
-            console.log('\n🚀 SUKSES! Kapasitas/Persentase terisi sekarang sudah berhasil diperbarui di database dan cache!');
-        }
-
-    } catch (err) {
-        console.error('❌ Gagal memproses data sensor:', err);
+        // argumen posisional pertama = nodeId
+        nodeId = a;
     }
 }
 
-run()
-    .catch(console.error)
-    .finally(async () => {
-        await prisma.$disconnect();
-        // Close redis client if open so process can exit cleanly
-        try {
-            redisClient.disconnect();
-        } catch {}
+// Kalau user nggak kasih field apa pun, isi nilai contoh yg masuk akal.
+if (Object.keys(payload).length === 0) {
+    payload.weight = 12.5;
+    payload.volume = 75;
+    payload.battery = 90;
+    payload.distance = 12;
+    payload.rssi = -65;
+}
+
+const topic = `smartbin/${nodeId}/sensor`;
+
+// --- Connect & publish ---------------------------------------------------
+const client = mqtt.connect(brokerUrl, {
+    clientId: `smartbin-trigger-${Date.now()}`,
+    clean: true,
+    // Mosquitto lokal biasanya tanpa auth; kalau pakai, set MQTT_USERNAME/PASSWORD di .env.
+    username: process.env.MQTT_USERNAME || undefined,
+    password: process.env.MQTT_PASSWORD || undefined,
+    connectTimeout: 8000,
+});
+
+client.on('connect', () => {
+    console.log(`[trigger] Connected → ${brokerUrl}`);
+    client.publish(topic, JSON.stringify(payload), { qos: 1 }, (err) => {
+        if (err) {
+            console.error('[trigger] Publish gagal:', err.message);
+            client.end(() => process.exit(1));
+            return;
+        }
+        console.log(`[trigger] ✓ Published → ${topic}`);
+        console.log('[trigger] payload:', payload);
+        client.end(() => process.exit(0));
     });
+});
+
+client.on('error', (err) => {
+    console.error('[trigger] MQTT error:', err.message);
+    client.end(() => process.exit(1));
+});
+
+// Safety net: kalau broker nggak respon, jangan gantung selamanya.
+setTimeout(() => {
+    console.error('[trigger] Timeout — broker tidak merespon.');
+    client.end(() => process.exit(1));
+}, 10000);

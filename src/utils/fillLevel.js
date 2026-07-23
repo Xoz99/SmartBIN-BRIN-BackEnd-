@@ -42,3 +42,18 @@ export function distanceToLabel(distanceCm) {
     if (distanceCm > 37.0)  return 'HAMPIR PENUH';
     return 'PENUH';
 }
+
+/**
+ * Label status dari fill % — dipakai untuk tong yang sudah menghitung volume
+ * sendiri di firmware (EcoSort), supaya label tidak bertabrakan dengan volume.
+ * Ambang mengikuti dokumentasi hardware: >= 90% hampir penuh, 100% penuh.
+ * @param {number} pct
+ * @returns {'KOSONG'|'SEDANG'|'HAMPIR PENUH'|'PENUH'|null}
+ */
+export function fillPctToLabel(pct) {
+    if (pct == null || Number.isNaN(pct)) return null;
+    if (pct >= 100) return 'PENUH';
+    if (pct >= 90)  return 'HAMPIR PENUH';
+    if (pct >= 10)  return 'SEDANG';
+    return 'KOSONG';
+}

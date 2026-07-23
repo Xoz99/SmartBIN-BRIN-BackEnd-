@@ -84,3 +84,13 @@ export async function findActiveAlert(binId, type) {
         orderBy: { createdAt: 'desc' },
     });
 }
+
+/**
+ * Naikkan tingkat alert yang masih aktif (mis. WARNING → CRITICAL) tanpa
+ * membuat baris alert baru.
+ * @param {string} id
+ * @param {{ severity: 'WARNING'|'CRITICAL', message: string }} data
+ */
+export async function escalateAlert(id, data) {
+    return prisma.alert.update({ where: { id }, data });
+}

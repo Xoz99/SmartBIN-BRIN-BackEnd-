@@ -19,6 +19,8 @@ import depositsRoutes from './routes/deposits.route.js';
 import disposalsRoutes from './routes/disposals.route.js';
 import settingsRoutes from './routes/settings.route.js';
 import analyticsRoutes from './routes/analytics.route.js';
+import classificationsRoutes from './routes/classifications.route.js';
+import ingestRoutes from './routes/ingest.route.js';
 
 export function createApp() {
     const app = express();
@@ -59,6 +61,8 @@ export function createApp() {
     app.use('/disposals', disposalsRoutes);
     app.use('/settings', settingsRoutes);
     app.use('/analytics', analyticsRoutes);
+    app.use('/classifications', classificationsRoutes);
+    app.use('/ingest', ingestRoutes);
 
     // ─── 404 handler ─────────────────────────────────────────────────────────
     app.use((_req, res) => {

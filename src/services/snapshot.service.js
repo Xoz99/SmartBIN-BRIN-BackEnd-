@@ -46,10 +46,28 @@ export async function backfillSnapshots(days = 7) {
 }
 
 /**
- * Grafik 7 hari: kembalikan {day:"YYYY-MM-DD", totalKg} 7 titik terakhir.
+ * Grafik N hari: kembalikan deret {day:"YYYY-MM-DD", totalKg} yang KONTINU
+ * (selalu N titik, hari ini di paling kanan). Sumber tiap hari:
+ *   - pakai snapshot zona bila ada & > 0 (data resmi dari sensor/zona),
+ *   - kalau snapshot 0/absen → fallback ke total berat deposit hari itu.
+ * Bikin grafik tetap terisi dari deposit riil walau snapshot zona belum jalan.
  */
 export async function getWeeklyVolume(days = 7) {
-    return getRecentSnapshots(days);
+    const snaps = await getRecentSnapshots(days);
+    const snapMap = new Map(snaps.map((s) => [s.day, s.totalKg]));
+    const perDay = await sumWeightPerDay(days); // Map "YYYY-MM-DD" -> kg dari deposit
+
+    const out = [];
+    for (let i = days - 1; i >= 0; i--) {
+        const d = new Date();
+        d.setHours(0, 0, 0, 0);
+        d.setDate(d.getDate() - i);
+        const key = dayKey(d);
+        const snapKg = snapMap.get(key) ?? 0;
+        const depKg = Math.round(perDay.get(key) ?? 0);
+        out.push({ day: key, totalKg: snapKg > 0 ? snapKg : depKg });
+    }
+    return out;
 }
 
 /**

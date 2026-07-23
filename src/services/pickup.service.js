@@ -6,7 +6,7 @@ import { broadcast } from '../websocket/ws.js';
 import { logger } from '../utils/logger.js';
 import { prisma } from '../config/db.js';
 import { redisClient } from '../config/redis.js';
-import { setConfirmedWeight } from '../config/weightMode.js';
+import { setConfirmedWeight, clearWeighEpisode } from '../config/weightMode.js';
 
 /**
  * Reset isi tong jadi KOSONG setelah diangkut: volume & berat = 0, alert FULL
@@ -31,6 +31,7 @@ async function resetBinAfterPickup(bin) {
         } catch { /* ignore */ }
     }
     await setConfirmedWeight(bin.id, 0);
+    await clearWeighEpisode(bin.id); // buang sisa episode timbang (mode accumulate)
 
     // 4. Beritahu dashboard (kapasitas balik 0)
     broadcast('BIN_UPDATE', {

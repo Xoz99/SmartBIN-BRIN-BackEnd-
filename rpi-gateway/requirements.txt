@@ -1,5 +1,9 @@
 paho-mqtt>=2.0
 python-dotenv>=1.0
+# HTTP poster (gateway_http.py) — kirim ke backend /ingest/sensor
+requests>=2.31
+# LoRa via serial (LORA_DRIVER=serial) — board LoRa32/TTGO RX nyolok USB ke Raspi
+pyserial>=3.5
 # LoRa (RFM9x / SX127x via SPI). Skip these if LORA_DRIVER=mock during testing.
 adafruit-blinka>=8.0
 adafruit-circuitpython-rfm9x>=2.2

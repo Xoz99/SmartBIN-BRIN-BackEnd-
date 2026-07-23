@@ -1,5 +1,7 @@
 import { verifyToken } from '../../services/auth.service.js';
 import { error } from '../../utils/response.js';
+import { env } from '../../config/env.js';
+import { logger } from '../../utils/logger.js';
 
 /**
  * JWT auth middleware — reads token from Authorization: Bearer <token>
@@ -18,6 +20,24 @@ export function authenticate(req, res, next) {
     } catch {
         return error(res, 'Invalid or expired token', 401);
     }
+}
+
+/**
+ * Device auth middleware — untuk perangkat (raspi) yang push data via HTTP.
+ * Bukan JWT: cocokkan header `X-Device-Key` dengan env DEVICE_INGEST_KEY.
+ * Kalau DEVICE_INGEST_KEY belum di-set, endpoint dibiarkan terbuka (dev lokal)
+ * dengan peringatan di log.
+ */
+export function deviceAuth(req, res, next) {
+    const configured = env.DEVICE_INGEST_KEY;
+    if (!configured) {
+        logger.warn('[deviceAuth] DEVICE_INGEST_KEY belum di-set — endpoint device terbuka.');
+        return next();
+    }
+    if (req.headers['x-device-key'] !== configured) {
+        return error(res, 'Invalid device key', 401);
+    }
+    next();
 }
 
 /**

@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+numpy
+Pillow
+google-genai
+paho-mqtt
+pyserial
+requests   # jalur HTTP perbandingan (COMPARE_HTTP=1) + lora_tx_seed.py --http
+ai-edge-litert
+opencv-python-headless   # kamera realtime di Raspi (auto klasifikasi tanpa web)

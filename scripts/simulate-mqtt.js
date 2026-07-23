@@ -19,6 +19,9 @@ const INTERVAL_MS = 5000;
 const client = mqtt.connect(BROKER_URL, {
     clientId: `smartbin-simulator-${Date.now()}`,
     clean: true,
+    // Broker (HiveMQ Cloud) wajib auth — pakai kredensial yang sama dgn backend.
+    username: process.env.MQTT_USERNAME,
+    password: process.env.MQTT_PASSWORD,
 });
 
 // Internal state per node
