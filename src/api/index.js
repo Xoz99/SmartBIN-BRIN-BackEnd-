@@ -25,6 +25,11 @@ import ingestRoutes from './routes/ingest.route.js';
 export function createApp() {
     const app = express();
 
+    // Di belakang reverse proxy (Caddy) — percaya 1 hop supaya IP asli klien
+    // terbaca dari X-Forwarded-For (rate-limit jadi per-IP asli, bukan global).
+    // JANGAN pakai `true` (X-Forwarded-For gampang dipalsuin).
+    app.set('trust proxy', 1);
+
     // ─── Global Middleware ────────────────────────────────────────────────────
     app.use(helmet());
 
