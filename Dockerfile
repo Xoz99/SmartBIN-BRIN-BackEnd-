@@ -18,6 +18,7 @@ RUN npx prisma generate
 # Copy source
 COPY src ./src
 COPY server.js ./
+COPY scripts ./scripts
 
 # Create logs directory
 RUN mkdir -p logs
