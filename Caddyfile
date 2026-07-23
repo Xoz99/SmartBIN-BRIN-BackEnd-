@@ -1,0 +1,13 @@
+# Backend SmartBIN di root domain smartbin.sbs.
+# Caddy otomatis ambil sertifikat HTTPS Let's Encrypt (GRATIS) —
+# syarat: DNS smartbin.sbs sudah nunjuk ke IP VPS + port 80/443 terbuka.
+# reverse_proxy otomatis dukung WebSocket (wss://) juga.
+
+smartbin.sbs {
+	reverse_proxy backend:3000
+}
+
+# (opsional) redirect www → root
+www.smartbin.sbs {
+	redir https://smartbin.sbs{uri}
+}
