@@ -1,6 +1,17 @@
-import { getClassificationSummary } from '../../services/classification.service.js';
+import { getClassificationSummary, getRecentClassifications } from '../../services/classification.service.js';
 import { handleClassificationData } from '../../mqtt/handlers/classificationData.js';
 import { success, error } from '../../utils/response.js';
+
+// GET /classifications?binId=&from=&to=&limit= — daftar deteksi terbaru (Analitik)
+export async function classificationListController(req, res) {
+    try {
+        const { binId, from, to, limit } = req.query;
+        const data = await getRecentClassifications({ binId, from, to, limit });
+        return success(res, data, 'Daftar klasifikasi');
+    } catch (err) {
+        return error(res, err.message, 500);
+    }
+}
 
 // GET /classifications/summary?from=&to=&binId=&areaId=
 export async function classificationSummaryController(req, res) {

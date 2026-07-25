@@ -50,3 +50,25 @@ export async function getClassificationSummary({ from, to, binId, areaId } = {})
         mostCommon: total ? top.label : null,
     };
 }
+
+/**
+ * Daftar klasifikasi TERBARU (tiap deteksi kamera/pemilah) — untuk panel
+ * "Jenis Sampah Terdeteksi" di Analitik. Beda dari deposit: classification
+ * tercatat SETIAP deteksi (tak butuh pairing berat).
+ * @param {{binId?:string, from?:string, to?:string, limit?:number}} opts
+ */
+export async function getRecentClassifications({ binId, from, to, limit = 20 } = {}) {
+    const where = {};
+    if (binId) where.binId = binId;
+    if (from || to) {
+        where.createdAt = {};
+        if (from) where.createdAt.gte = new Date(from);
+        if (to) where.createdAt.lte = new Date(to);
+    }
+    return prisma.classification.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: Math.min(Math.max(1, Number(limit) || 20), 100),
+        include: { bin: { select: { nodeId: true, location: true } } },
+    });
+}
