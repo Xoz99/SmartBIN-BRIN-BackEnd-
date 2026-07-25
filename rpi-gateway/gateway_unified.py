@@ -215,6 +215,33 @@ def lora_receiver() -> Iterator[str]:
 
 
 # ─── Packet parser (dari string LoRa) ────────────────────────────────────────
+def parse_packet_full(text: str) -> Tuple[Optional[str], Optional[dict]]:
+    """Ambil (nodeId, payload PENUH). Untuk payload EcoSort bertingkat (battery &
+    kompartemen sebagai object), teruskan JSON APA ADANYA — backend yang flatten
+    (normalizeSensorPayload). Ini penting: parser lama coba float(battery) padahal
+    battery = object → TypeError → paket ke-DROP. Fallback ke pipe utk format lama."""
+    text = text.strip()
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            node = data.get("nodeId") or data.get("node") or data.get("n")
+            if not node:
+                return None, None
+            # nodeId dikirim terpisah → keluarkan dari payload.
+            payload = {k: v for k, v in data.items() if k not in ("nodeId", "node", "n")}
+            # Kompat format compact lama (w/v/b/g/r) → nama penuh. Tidak menyentuh
+            # payload nested (kunci 'battery'/'organik'/dst tetap utuh).
+            for short, full in (("w", "weight"), ("v", "volume"), ("b", "battery"),
+                                ("g", "gas"), ("r", "rssi")):
+                if short in payload and full not in payload:
+                    payload[full] = payload.pop(short)
+            return node, payload
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    # Fallback: format pipe lama  node|weight|volume|battery|gas|rssi
+    return parse_packet(text)
+
+
 def parse_packet(text: str) -> Tuple[Optional[str], Optional[dict]]:
     """JSON dulu, lalu pipe-separated. Sama seperti gateway_http.py."""
     text = text.strip()
@@ -329,9 +356,11 @@ def _poster_worker() -> None:
             ok = post_sensor(node, payload)
             flag = "✓" if ok else "✗"
             tp = payload.get("throughputBps")
+            # Payload nested EcoSort tak punya weight/volume flat → tampilkan berat_g.
+            w = payload.get('weight', payload.get('berat_g', '-'))
             log.info(
                 f"{flag} [{payload.get('transport', '?'):>4}] {node} | "
-                f"w={payload.get('weight')}kg v={payload.get('volume')}% "
+                f"w={w} v={payload.get('volume', '-')} "
                 f"rssi={payload.get('rssi', '-')}dBm snr={payload.get('snr', '-')}dB "
                 f"len={payload.get('packetLen', '-')}B "
                 f"tp={f'{tp:.0f}bps' if tp else '-'} "
@@ -448,7 +477,7 @@ def main() -> None:
     for raw in lora_receiver():
         if not running:
             break
-        node, payload = parse_packet(raw)
+        node, payload = parse_packet_full(raw)  # teruskan payload penuh (nested EcoSort OK)
         if not node:
             log.warning(f"unparseable packet: {raw[:80]!r}")
             continue

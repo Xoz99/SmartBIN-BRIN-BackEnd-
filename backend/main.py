@@ -172,12 +172,15 @@ def _serial_dispatcher_loop():
                     print(f"[Dispatcher] JSON invalid: {e} | raw: {raw_line[:100]}")
                     continue
 
-                # Suntik metadata penelitian: seq (nomor urut → packet loss) + sentAt
-                # (jam device → latency). Dipakai jalur LoRa & HTTP. Nilai sama untuk
-                # satu bacaan → perbandingan per-paket adil.
-                _seq_counter += 1
-                data["seq"] = _seq_counter
-                data["sentAt"] = datetime.now(timezone.utc).isoformat()
+                # Metadata penelitian: seq (nomor urut → packet loss) + sentAt (jam
+                # device → latency). STM32 EcoSort SUDAH sertakan seq/sentAt sendiri →
+                # HORMATI punya device (jangan ditimpa). Hanya suntik kalau device
+                # belum kirim (mis. firmware lama). Nilai sama untuk satu bacaan dipakai
+                # jalur LoRa & HTTP → perbandingan per-paket adil.
+                if "seq" not in data:
+                    _seq_counter += 1
+                    data["seq"] = _seq_counter
+                data.setdefault("sentAt", datetime.now(timezone.utc).isoformat())
                 data.setdefault("nodeId", NODE_ID)
                 # JSON yang diteruskan (tanpa field internal _*).
                 fwd = json.dumps({k: v for k, v in data.items() if not str(k).startswith("_")})

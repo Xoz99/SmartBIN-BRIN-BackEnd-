@@ -123,7 +123,14 @@ export function normalizeSensorPayload(raw) {
         payload.weight = Math.max(0, raw.berat_g / 1000);
     }
 
-    // `rssi` tidak ada (Raspi publish via Ethernet/WiFi, bukan ESP32) → dibiarkan kosong.
+    // Metrik link & metadata penelitian: TERUSKAN apa adanya. normalizeSensorPayload
+    // membangun payload flat dari nol, jadi kalau tidak disalin ulang, field ini
+    // HILANG untuk payload EcoSort bertingkat → rssi/snr/packetLen + perbandingan
+    // transport (seq/sentAt/transport/throughputBps) jadi kosong. (Gateway RX yang
+    // menempelkan rssi/snr/packetLen/transport dari paket LoRa.)
+    for (const k of ['rssi', 'snr', 'packetLen', 'throughputBps', 'transport', 'seq', 'sentAt', 'gas']) {
+        if (raw[k] !== undefined && payload[k] === undefined) payload[k] = raw[k];
+    }
 
     return { payload, compartments: Object.keys(compartments).length ? compartments : null };
 }
