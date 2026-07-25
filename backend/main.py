@@ -434,8 +434,24 @@ CAMERA_INDEX     = int(os.environ.get("CAMERA_INDEX", "0"))           # 0 = kame
 MOTION_THRESHOLD = int(os.environ.get("MOTION_THRESHOLD", "1500000")) # total piksel berubah utk dianggap "ada objek"
 SETTLE_DELAY     = float(os.environ.get("SETTLE_DELAY", "0.6"))       # detik tunggu objek diam sebelum jepret
 CONF_THRESHOLD   = float(os.environ.get("CONF_THRESHOLD", "0.75"))    # confidence minimum utk aktuasi + lapor
-COOLDOWN_SEC     = float(os.environ.get("COOLDOWN_SEC", "3.0"))       # jeda antar deteksi (anti jepret beruntun)
+COOLDOWN_SEC     = float(os.environ.get("COOLDOWN_SEC", "3.0"))       # jeda saat TAK ada aktuasi (conf rendah / jepret gagal)
 AUTO_START_CAM   = os.environ.get("AUTO_START_CAM", "1") == "1"       # default ON di Raspi (set 0 utk matikan)
+
+# Durasi aktuator per kategori (detik). Setelah aktuasi, kamera DIKUNCI selama ini
+# supaya tidak jepret ulang saat mekanik (stepper+tilt+servo+auto-reset) MASIH GERAK
+# — mencegah deteksi/aktuasi dobel & frame ngaco. STM32 TIDAK diubah; timing di sisi
+# Raspi. Ukur ulang sekali dgn stopwatch di hardware asli, tambah ~1s buffer, lalu
+# override per-kategori lewat env: ACTUATOR_SEC_ORGANIK / _ANORGANIK / _B3.
+ACTUATOR_TIMES = {
+    "organik":   float(os.environ.get("ACTUATOR_SEC_ORGANIK",   "7.0")),
+    "anorganik": float(os.environ.get("ACTUATOR_SEC_ANORGANIK", "8.0")),
+    "b3":        float(os.environ.get("ACTUATOR_SEC_B3",         "9.5")),
+}
+ACTUATOR_DEFAULT_SEC = float(os.environ.get("ACTUATOR_SEC_DEFAULT", "10.0"))
+
+def _actuator_lock_sec(kategori: str) -> float:
+    """Estimasi durasi aktuator utk kategori (case-insensitive: 'Organik'→'organik')."""
+    return ACTUATOR_TIMES.get((kategori or "").lower().strip(), ACTUATOR_DEFAULT_SEC)
 
 
 class CameraWorker:
@@ -503,6 +519,7 @@ class CameraWorker:
                 if motion > MOTION_THRESHOLD:
                     # Ada objek masuk → tunggu diam → jepret frame final
                     time.sleep(SETTLE_DELAY)
+                    lock_sec = COOLDOWN_SEC  # default: tak ada aktuasi → cooldown pendek
                     ok2, shot = self.cap.read()
                     if ok2:
                         img = Image.fromarray(cv2.cvtColor(shot, cv2.COLOR_BGR2RGB))
@@ -513,14 +530,20 @@ class CameraWorker:
                             kategori, conf = None, 0.0
 
                         if kategori and conf >= CONF_THRESHOLD:
+                            # kirim_ke_stm32 pakai serial `arduino` yang SUDAH dibuka di
+                            # init_all_serial() — tidak buka koneksi serial baru.
                             print(f"[CAM] ✓ {kategori} ({conf:.0%}) → aktuasi STM32 + lapor backend")
                             kirim_ke_stm32(kategori)
                             report_classification(kategori, conf)
                             self.last = {"kategori": kategori, "confidence": conf, "ts": now}
+                            # Kunci kamera selama aktuator kategori ini bergerak (7–9.5s),
+                            # bukan cooldown tetap — cegah jepret ulang saat mekanik gerak.
+                            lock_sec = _actuator_lock_sec(kategori)
+                            print(f"[CAM] LOCK kamera {lock_sec:.1f}s — tunggu aktuator '{kategori}' selesai")
                         else:
                             print(f"[CAM] objek terdeteksi tapi confidence rendah ({conf:.0%}) — dilewati")
 
-                    cooldown_until = time.time() + COOLDOWN_SEC
+                    cooldown_until = time.time() + lock_sec
                     prev = None  # reset baseline setelah aksi
                     continue
 
@@ -655,7 +678,8 @@ def camera_status():
         "camera_index": CAMERA_INDEX,
         "conf_threshold": CONF_THRESHOLD,
         "motion_threshold": MOTION_THRESHOLD,
-        "cooldown_sec": COOLDOWN_SEC,
+        "cooldown_sec": COOLDOWN_SEC,           # jeda saat tak ada aktuasi
+        "actuator_lock_sec": ACTUATOR_TIMES,    # lock kamera per-kategori saat aktuasi
         "last_detection": camera_worker.last,
         "error": camera_worker.error,
     }
