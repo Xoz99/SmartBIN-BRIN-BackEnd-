@@ -46,11 +46,14 @@ MODEL_PATH   = "model_advanced.tflite"
 FRONTEND_DIR = "../frontend"
 CLASS_NAMES  = ["Anorganik", "B3", "Organik"]
 
-# --- SERIAL PORTS — WAJIB beda satu sama lain! ---
-# Cek dengan `ls /dev/ttyACM* /dev/ttyUSB*` dan `dmesg | grep tty`
-# Bisa di-override per-node lewat env (STM32_PORT / LORA_PORT) tanpa ubah kode.
-STM32_PORT = os.environ.get("STM32_PORT", "/dev/ttyACM1")   # STM32 (STMicroelectronics Virtual COM Port)
-LORA_PORT  = os.environ.get("LORA_PORT", "/dev/ttyACM0")    # LoRa32 gateway/transmitter (QinHeng/CH340)
+# --- SERIAL PORTS ---
+# AUTO-DETEKSI STM32 vs LoRa dari deskripsi/VID USB (biar tidak ketuker saat nomor
+# ttyACM* geser tiap reboot — penyebab "perintah aktuator nyasar ke LoRa").
+#   STM32   = STMicroelectronics / Virtual COM / VID 0483
+#   LoRa32  = CH340 / QinHeng / VID 1a86 (atau CP210x / Silicon Labs)
+# Override paksa lewat env STM32_PORT / LORA_PORT kalau deteksi meleset.
+STM32_PORT = os.environ.get("STM32_PORT")   # None → auto-detect
+LORA_PORT  = os.environ.get("LORA_PORT")    # None → auto-detect
 BAUD_RATE  = int(os.environ.get("BAUD_RATE", "115200"))
 
 # --- Backend SmartBIN (MQTT HiveMQ Cloud) — set per-node lewat env var. ---
@@ -102,34 +105,53 @@ _http_session  = None   # requests.Session buat jalur HTTP
 # ========================================================
 # INIT SERIAL — SEKALI SAJA, DI SATU TEMPAT
 # ========================================================
+def _detect_ports():
+    """Deteksi port STM32 & LoRa dari deskripsi/VID USB. Balikin (stm32, lora).
+    STM32 = STMicroelectronics/Virtual COM/VID 0483; LoRa = CH340/QinHeng/VID 1a86."""
+    stm = lora = None
+    for p in serial.tools.list_ports.comports():
+        blob = f"{p.description} {p.manufacturer or ''} {getattr(p, 'product', '') or ''} {p.hwid or ''}".lower()
+        if any(k in blob for k in ("stmicro", "stm32", "virtual com", "0483")):
+            stm = stm or p.device
+        elif any(k in blob for k in ("ch340", "ch910", "qinheng", "1a86", "wch", "cp210", "silicon labs")):
+            lora = lora or p.device
+    return stm, lora
+
+
 def init_all_serial():
     """
     Buka koneksi serial STM32 dan LoRa satu kali di awal startup.
-    Kalau dua port ternyata sama, salah satu SENGAJA tidak dibuka
-    biar gak rebutan port yang sama.
+    Port ditentukan berjenjang: env (STM32_PORT/LORA_PORT) > auto-deteksi USB >
+    default ttyACM. Auto-deteksi mencegah port ketuker saat ttyACM* geser.
     """
     global arduino, lora_tx
 
-    if STM32_PORT == LORA_PORT:
-        print(f"[!] FATAL: STM32_PORT dan LORA_PORT sama-sama '{STM32_PORT}'! "
-              f"Cek `ls /dev/ttyACM*` dan pisahkan portnya di config.")
-        return
+    auto_stm, auto_lora = _detect_ports()
+    stm_port  = STM32_PORT or auto_stm or "/dev/ttyACM1"
+    lora_port = LORA_PORT  or auto_lora or "/dev/ttyACM0"
+    print(f"[Serial] Deteksi USB → STM32={auto_stm or '-'} LoRa={auto_lora or '-'} | "
+          f"dipakai: STM32={stm_port}, LoRa={lora_port}")
+
+    if stm_port == lora_port:
+        print(f"[!] PERINGATAN: STM32 & LoRa sama-sama '{stm_port}'. Set env "
+              f"STM32_PORT/LORA_PORT manual. LoRa dilewati, STM32 tetap dicoba.")
 
     try:
-        arduino = serial.Serial(STM32_PORT, BAUD_RATE, timeout=1)
+        arduino = serial.Serial(stm_port, BAUD_RATE, timeout=1)
         time.sleep(2)
-        print(f"[+] STM32 terhubung di {STM32_PORT} @ {BAUD_RATE}")
+        print(f"[+] STM32 terhubung di {stm_port} @ {BAUD_RATE}")
     except Exception as e:
         arduino = None
-        print(f"[!] Gagal buka STM32 di {STM32_PORT}: {e}")
+        print(f"[!] Gagal buka STM32 di {stm_port}: {e}")
 
-    try:
-        lora_tx = serial.Serial(LORA_PORT, BAUD_RATE, timeout=1)
-        time.sleep(2)
-        print(f"[+] LoRa terhubung di {LORA_PORT} @ {BAUD_RATE}")
-    except Exception as e:
-        lora_tx = None
-        print(f"[!] Gagal buka LoRa di {LORA_PORT}: {e}")
+    if lora_port != stm_port:
+        try:
+            lora_tx = serial.Serial(lora_port, BAUD_RATE, timeout=1)
+            time.sleep(2)
+            print(f"[+] LoRa terhubung di {lora_port} @ {BAUD_RATE}")
+        except Exception as e:
+            lora_tx = None
+            print(f"[!] Gagal buka LoRa di {lora_port}: {e}")
 
 
 def close_all_serial():
@@ -290,8 +312,10 @@ def init_mqtt():
         client = mqtt_client.Client(client_id=f"fastapi-ecosort-{NODE_ID}")
 
     client.username_pw_set(MQTT_USER, MQTT_PASS)
-    client.tls_set(cert_reqs=ssl.CERT_NONE)
-    client.tls_insecure_set(True)
+    # Verifikasi TLS STANDAR OS (perbaikan tim IoT): HiveMQ Cloud kadang nolak
+    # koneksi insecure (cert_reqs=CERT_NONE) → MQTT putus-nyambung / "sebagian jalan".
+    # Butuh CA certs OS (Pi: `sudo apt install ca-certificates`).
+    client.tls_set()
     client.on_connect    = _on_connect
     client.on_disconnect = _on_disconnect
 
