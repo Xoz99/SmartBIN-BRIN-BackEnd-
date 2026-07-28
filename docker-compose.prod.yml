@@ -56,9 +56,15 @@ services:
         condition: service_healthy
     volumes:
       - ./logs:/app/logs
-    # Tidak publish port ke publik — Caddy yang proxy dengan HTTPS.
+    # Caddy proxy internal via jaringan compose (HTTPS publik).
     expose:
       - "3000"
+    # Bind port 3000 ke IP Tailscale VPS SAJA (bukan publik) — supaya Raspi yang
+    # di jaringan kost (yang tak bisa jangkau IP publik VPS) tetap bisa nembak
+    # backend lewat Tailscale: BACKEND_HTTP_URL=http://<ip-tailscale-vps>:3000.
+    # Default 127.0.0.1 = host-local saja (aman) kalau BACKEND_TS_BIND belum di-set.
+    ports:
+      - "${BACKEND_TS_BIND:-127.0.0.1}:3000:3000"
 
   # ─── Predict service (EfficientNet TFLite) — inference kamera admin ──────────
   predict:
