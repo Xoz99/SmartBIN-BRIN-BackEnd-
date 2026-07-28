@@ -1,5 +1,6 @@
 import { upsertSnapshot, getRecentSnapshots, dayKey } from '../models/snapshot.model.js';
 import { sumWeightPerDay } from '../models/deposit.model.js';
+import { maxWeightPerDay } from '../models/sensorLog.model.js';
 import { getAllZona } from './prediksi.service.js';
 import { logger } from '../utils/logger.js';
 
@@ -47,15 +48,17 @@ export async function backfillSnapshots(days = 7) {
 
 /**
  * Grafik N hari: kembalikan deret {day:"YYYY-MM-DD", totalKg} yang KONTINU
- * (selalu N titik, hari ini di paling kanan). Sumber tiap hari:
- *   - pakai snapshot zona bila ada & > 0 (data resmi dari sensor/zona),
- *   - kalau snapshot 0/absen → fallback ke total berat deposit hari itu.
- * Bikin grafik tetap terisi dari deposit riil walau snapshot zona belum jalan.
+ * (selalu N titik, hari ini di paling kanan). Sumber tiap hari (berjenjang):
+ *   1. snapshot zona bila ada & > 0 (data resmi zona/LSTM),
+ *   2. kalau 0/absen → total berat deposit hari itu,
+ *   3. kalau masih 0 → berat PUNCAK sensor_logs hari itu (load cell berat_g).
+ * Bikin grafik tetap terisi dari data riil walau snapshot zona & deposit kosong.
  */
 export async function getWeeklyVolume(days = 7) {
     const snaps = await getRecentSnapshots(days);
     const snapMap = new Map(snaps.map((s) => [s.day, s.totalKg]));
-    const perDay = await sumWeightPerDay(days); // Map "YYYY-MM-DD" -> kg dari deposit
+    const perDay = await sumWeightPerDay(days);     // deposit
+    const sensorPerDay = await maxWeightPerDay(days); // fallback sensor_logs
 
     const out = [];
     for (let i = days - 1; i >= 0; i--) {
@@ -65,7 +68,9 @@ export async function getWeeklyVolume(days = 7) {
         const key = dayKey(d);
         const snapKg = snapMap.get(key) ?? 0;
         const depKg = Math.round(perDay.get(key) ?? 0);
-        out.push({ day: key, totalKg: snapKg > 0 ? snapKg : depKg });
+        const senKg = Math.round(sensorPerDay.get(key) ?? 0);
+        // Berjenjang: snapshot → deposit → sensor_logs.
+        out.push({ day: key, totalKg: snapKg > 0 ? snapKg : (depKg > 0 ? depKg : senKg) });
     }
     return out;
 }
