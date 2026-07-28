@@ -20,6 +20,14 @@ import paho.mqtt.client as mqtt_client
 import serial
 import serial.tools.list_ports
 
+# Baca file .env (di folder yang sama) kalau ada → config per-node tanpa ubah kode
+# maupun ketik env panjang tiap run. Cukup `python3 main.py`. (pip install python-dotenv)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # ========================================================
 # SETUP TFLITE RUNTIME
 # ========================================================
