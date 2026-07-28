@@ -464,6 +464,13 @@ CONF_THRESHOLD   = float(os.environ.get("CONF_THRESHOLD", "0.75"))    # confiden
 COOLDOWN_SEC     = float(os.environ.get("COOLDOWN_SEC", "3.0"))       # jeda saat TAK ada aktuasi (conf rendah / jepret gagal)
 AUTO_START_CAM   = os.environ.get("AUTO_START_CAM", "1") == "1"       # default ON di Raspi (set 0 utk matikan)
 
+# Monitor kamera di dashboard: push frame TERAKHIR ke backend tiap CAMERA_PUSH_SEC
+# (Pi konek KELUAR ke server publik — tak perlu buka port Pi). Backend simpan frame
+# terakhir per bin; FE ambil via <img> /camera/{nodeId}/latest.jpg.
+CAMERA_PUSH     = os.environ.get("CAMERA_PUSH", "1") == "1"
+CAMERA_PUSH_SEC = float(os.environ.get("CAMERA_PUSH_SEC", "1.5"))
+CAMERA_JPEG_Q   = int(os.environ.get("CAMERA_JPEG_Q", "70"))
+
 # Durasi aktuator per kategori (detik). Setelah aktuasi, kamera DIKUNCI selama ini
 # supaya tidak jepret ulang saat mekanik (stepper+tilt+servo+auto-reset) MASIH GERAK
 # — mencegah deteksi/aktuasi dobel & frame ngaco. STM32 TIDAK diubah; timing di sisi
@@ -489,6 +496,7 @@ class CameraWorker:
         self.running = False
         self.cap     = None
         self.last    = {"kategori": None, "confidence": None, "ts": None}
+        self.last_raw = None   # frame BGR terakhir (buat push monitor ke dashboard)
         self.error   = None
 
     def start(self):
@@ -534,6 +542,7 @@ class CameraWorker:
             if not ok:
                 time.sleep(0.05)
                 continue
+            self.last_raw = frame  # simpan frame terakhir (dipush ke dashboard)
 
             gray = cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (21, 21), 0)
             now = time.time()
@@ -585,6 +594,36 @@ class CameraWorker:
 
 camera_worker = CameraWorker()
 
+
+def _camera_push_loop():
+    """Push frame kamera TERAKHIR ke backend tiap CAMERA_PUSH_SEC untuk MONITOR
+    di dashboard. Encode JPEG di sini (bukan tiap frame) supaya hemat CPU. Pi
+    konek KELUAR ke server (BACKEND_HTTP_URL) — tak perlu buka port di Pi."""
+    try:
+        import requests
+    except ImportError:
+        print("[CamPush] modul 'requests' belum ada — monitor kamera nonaktif.")
+        return
+    url = f"{BACKEND_HTTP_URL}/camera/frame"
+    while _is_running:
+        time.sleep(CAMERA_PUSH_SEC)
+        if not (CAMERA_PUSH and camera_worker.running):
+            continue
+        frame = camera_worker.last_raw
+        if frame is None or not _HAS_CV2:
+            continue
+        try:
+            ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, CAMERA_JPEG_Q])
+            if not ok:
+                continue
+            requests.post(url, data=jpg.tobytes(), timeout=5, headers={
+                "Content-Type": "image/jpeg",
+                "X-Node-Id": NODE_ID,
+                "X-Device-Key": DEVICE_INGEST_KEY,
+            })
+        except Exception as e:
+            print(f"[CamPush] gagal kirim frame: {e}")
+
 # ========================================================
 # GEMINI
 # ========================================================
@@ -623,6 +662,10 @@ async def lifespan(app: FastAPI):
             print("[CAM] Auto-start kamera Raspi aktif (AUTO_START_CAM=1) — milah otomatis tanpa web.")
         else:
             print(f"[CAM] Auto-start kamera gagal: {camera_worker.error}")
+
+    if CAMERA_PUSH:
+        threading.Thread(target=_camera_push_loop, daemon=True).start()
+        print(f"[CAM] Push frame monitor aktif → {BACKEND_HTTP_URL}/camera/frame tiap {CAMERA_PUSH_SEC}s")
 
     print("[+] Startup selesai: STM32, LoRa, MQTT, Dispatcher semua aktif.")
     yield
