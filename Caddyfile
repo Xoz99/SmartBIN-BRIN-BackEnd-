@@ -4,7 +4,14 @@
 # reverse_proxy otomatis dukung WebSocket (wss://) juga.
 
 smartbin.sbs {
-	reverse_proxy backend:3000
+	# Inference kamera admin (EfficientNet TFLite) → service predict.
+	handle /predict* {
+		reverse_proxy predict:9000
+	}
+	# Sisanya → backend Node.
+	handle {
+		reverse_proxy backend:3000
+	}
 }
 
 # (opsional) redirect www → root

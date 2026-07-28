@@ -60,6 +60,19 @@ services:
     expose:
       - "3000"
 
+  # ─── Predict service (EfficientNet TFLite) — inference kamera admin ──────────
+  predict:
+    build:
+      context: ./predict-service
+      dockerfile: Dockerfile
+    container_name: smartbin-predict
+    restart: unless-stopped
+    volumes:
+      # Pakai model yang sama dengan Pi (ikut ke-clone di repo).
+      - ./backend/model_advanced.tflite:/app/model/model_advanced.tflite:ro
+    expose:
+      - "9000"
+
   caddy:
     image: caddy:2-alpine
     container_name: smartbin-caddy
@@ -73,6 +86,7 @@ services:
       - caddy_config:/config
     depends_on:
       - backend
+      - predict
 
 volumes:
   postgres_data:
