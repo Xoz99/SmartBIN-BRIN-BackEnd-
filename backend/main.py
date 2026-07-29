@@ -81,6 +81,7 @@ FORWARD_LORA = os.environ.get("FORWARD_LORA", "1") == "1"
 
 # Log sensor ringkas: cetak tiap N bacaan (1=tiap bacaan, 5=lebih sepi). Kurangi spam.
 LOG_SENSOR_EVERY = int(os.environ.get("LOG_SENSOR_EVERY", "1"))
+LOG_RAW_SERIAL = os.environ.get("LOG_RAW_SERIAL", "1") not in ("0", "false", "")  # cetak baris MENTAH dari STM32 (sebelum diparse) apa adanya
 
 
 def _sensor_summary(d: dict) -> str:
@@ -202,6 +203,12 @@ def _serial_dispatcher_loop():
                 raw_line = arduino.readline().decode("utf-8", errors="ignore").strip()
                 if not raw_line:
                     continue
+
+                # RAW: tampilkan baris MENTAH persis yang dikirim STM32 lewat serial
+                # (termasuk baris non-JSON spt "[GPS]...", "[Jarak]...") — buat verifikasi
+                # data asli dari mikrokontroler sebelum diolah.
+                if LOG_RAW_SERIAL:
+                    print(f"[STM32 raw] {raw_line}")
 
                 # STM32 kadang kirim JSON dengan prefix teks (mis. "[->Raspi] {...}")
                 # dan/atau ada garbage bytes nyempil. Ambil substring dari '{' pertama
