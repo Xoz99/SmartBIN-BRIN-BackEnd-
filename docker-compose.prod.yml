@@ -54,6 +54,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # DNS reliable — cegah 'getaddrinfo EAI_AGAIN' waktu resolve HiveMQ saat boot
+    # (Docker embedded DNS kadang belum siap → MQTT gagal konek & tak retry).
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     volumes:
       - ./logs:/app/logs
     # Caddy proxy internal via jaringan compose (HTTPS publik).
