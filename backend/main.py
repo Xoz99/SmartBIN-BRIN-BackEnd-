@@ -492,6 +492,25 @@ COOLDOWN_SEC     = float(os.environ.get("COOLDOWN_SEC", "3.0"))       # jeda saa
 SAVE_SHOT = os.environ.get("SAVE_SHOT", "1") == "1"
 SHOT_PATH = os.environ.get("SHOT_PATH", "last_shot.jpg")
 
+# Deteksi objek DI ATAS platform (buletan merah): fokus ROI tengah + bandingkan dgn
+# kondisi KOSONG (baseline). Cuma analisis kalau ada objek nutupin platform & sudah
+# diam, SEKALI per objek. Nilai = rata-rata beda piksel (0-255). Sesuaikan via env.
+ROI_FRAC    = float(os.environ.get("ROI_FRAC", "0.6"))    # fraksi tengah frame (area buletan) yg dipantau+diklasifikasi
+OBJECT_DIFF = float(os.environ.get("OBJECT_DIFF", "18"))  # beda dari kosong utk dianggap ADA objek (naikin kalau sering false)
+CLEAR_DIFF  = float(os.environ.get("CLEAR_DIFF", "9"))    # beda di bawah ini = platform kosong lagi → re-arm
+STILL_MOVE  = float(os.environ.get("STILL_MOVE", "4"))    # gerak antar-frame di bawah ini = objek sudah diam
+STILL_NEED  = int(os.environ.get("STILL_NEED", "3"))      # butuh N frame diam berturut sebelum jepret
+
+
+def _center_roi(frame, frac):
+    """Crop kotak tengah frame (area platform/buletan). frac=0.6 → 60% tengah."""
+    h, w = frame.shape[:2]
+    s = int(min(h, w) * max(0.1, min(1.0, frac)))
+    cy, cx = h // 2, w // 2
+    y0 = max(0, cy - s // 2)
+    x0 = max(0, cx - s // 2)
+    return frame[y0:y0 + s, x0:x0 + s]
+
 # Mode OBJEK (motion-gate 1x): pas objek masuk → jepret+analisis SEKALI, lalu tunggu
 # objek diangkat (scene sepi >= REARM_CLEAR_SEC) baru siap objek berikutnya. Cegah
 # analisis berulang objek yang sama & spam confidence-rendah.
@@ -567,73 +586,76 @@ class CameraWorker:
             self.running = False
             return
 
-        print(f"[CAM] Kamera AKTIF (index {CAMERA_INDEX}) — mode OBJEK: jepret+analisis 1x tiap objek masuk.")
-        prev = None
-        armed = True          # siap analisis objek baru
-        clear_since = None    # sejak kapan scene sepi (buat re-arm)
+        print(f"[CAM] Kamera AKTIF (index {CAMERA_INDEX}) — mode PLATFORM: analisis objek di ROI tengah (buletan), 1x per objek.")
+        print("[CAM] (pastikan platform/buletan KOSONG saat start — dipakai sbg baseline)")
+        baseline = None       # ROI abu-abu saat platform KOSONG
+        prev_roi = None       # ROI frame sebelumnya (deteksi gerak)
+        armed = True
+        still = 0
 
         while self.running:
             ok, frame = self.cap.read()
             if not ok:
                 time.sleep(0.05)
                 continue
-            self.last_raw = frame  # frame terbaru buat feed monitor
+            self.last_raw = frame  # frame penuh buat feed monitor
 
-            gray = cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (21, 21), 0)
-            now = time.time()
+            roi = _center_roi(frame, ROI_FRAC)
+            gray = cv2.GaussianBlur(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY), (21, 21), 0)
 
-            if prev is not None:
-                delta  = cv2.absdiff(prev, gray)
-                thresh = cv2.threshold(delta, 25, 255, cv2.THRESH_BINARY)[1]
-                has_object = int(thresh.sum()) > MOTION_THRESHOLD
+            if baseline is None:
+                baseline = gray       # anggap platform kosong saat start
+                prev_roi = gray
+                time.sleep(0.03)
+                continue
 
-                if armed and has_object:
-                    # Objek masuk → tunggu diam → ambil SATU frame SEGAR → analisis 1x.
-                    time.sleep(SETTLE_DELAY)
-                    shot = frame
-                    for _ in range(3):
-                        ok2, f2 = self.cap.read()   # buang buffer basi, ambil frame segar
-                        if ok2:
-                            shot = f2
-                    self.last_raw = shot
-                    if SAVE_SHOT:
+            obj_diff = float(cv2.absdiff(gray, baseline).mean())   # beda dari kondisi kosong
+            move     = float(cv2.absdiff(gray, prev_roi).mean())    # gerak antar-frame
+            prev_roi = gray
+
+            if armed:
+                # Objek nutupin platform (beda dari kosong) DAN sudah diam beberapa frame.
+                if obj_diff > OBJECT_DIFF and move < STILL_MOVE:
+                    still += 1
+                    if still >= STILL_NEED:
+                        shot = frame
+                        for _ in range(2):
+                            ok2, f2 = self.cap.read()   # ambil frame segar
+                            if ok2:
+                                shot = f2
+                        shot_roi = _center_roi(shot, ROI_FRAC)
+                        self.last_raw = shot
+                        if SAVE_SHOT:
+                            try:
+                                cv2.imwrite(SHOT_PATH, shot_roi)  # yang PERSIS diklasifikasi
+                            except Exception:
+                                pass
+                        img = Image.fromarray(cv2.cvtColor(shot_roi, cv2.COLOR_BGR2RGB))
                         try:
-                            cv2.imwrite(SHOT_PATH, shot)  # frame yang diklasifikasi (debug)
-                        except Exception:
-                            pass
-                    img = Image.fromarray(cv2.cvtColor(shot, cv2.COLOR_BGR2RGB))
-                    try:
-                        kategori, conf = _predict(img)
-                    except Exception as e:
-                        print(f"[CAM] gagal klasifikasi: {e}")
-                        kategori, conf = None, 0.0
+                            kategori, conf = _predict(img)
+                        except Exception as e:
+                            print(f"[CAM] gagal klasifikasi: {e}")
+                            kategori, conf = None, 0.0
 
-                    if kategori and conf >= CONF_THRESHOLD:
-                        # kirim_ke_stm32 pakai serial `arduino` yang SUDAH dibuka (tak baru).
-                        print(f"[CAM] ✓ {kategori} ({conf:.0%}) → aktuasi STM32 + lapor backend")
-                        kirim_ke_stm32(kategori)
-                        report_classification(kategori, conf)
-                        self.last = {"kategori": kategori, "confidence": conf, "ts": now}
-                    else:
-                        print(f"[CAM] objek terdeteksi, confidence rendah ({conf:.0%}) — dilewati")
+                        if kategori and conf >= CONF_THRESHOLD:
+                            print(f"[CAM] ✓ {kategori} ({conf:.0%}) → aktuasi STM32 + lapor backend")
+                            kirim_ke_stm32(kategori)
+                            report_classification(kategori, conf)
+                            self.last = {"kategori": kategori, "confidence": conf, "ts": time.time()}
+                        else:
+                            print(f"[CAM] objek di platform, confidence rendah ({conf:.0%}) — dilewati")
 
-                    armed = False        # jangan analisis lagi sampai objek diangkat
-                    clear_since = None
-                    prev = None          # reset baseline gerakan
-                    continue
+                        armed = False    # tunggu objek diangkat
+                        still = 0
+                else:
+                    still = 0
+            else:
+                # Objek diangkat → platform balik kosong → re-arm + perbarui baseline.
+                if obj_diff < CLEAR_DIFF:
+                    armed = True
+                    baseline = gray
+                    print("[CAM] platform kosong — siap objek berikutnya.")
 
-                if not armed:
-                    # Tunggu scene bersih (objek diangkat) → re-arm buat objek berikutnya.
-                    if not has_object:
-                        if clear_since is None:
-                            clear_since = now
-                        elif now - clear_since >= REARM_CLEAR_SEC:
-                            armed = True
-                            print("[CAM] siap objek berikutnya.")
-                    else:
-                        clear_since = None
-
-            prev = gray
             time.sleep(0.03)  # ~30fps buat feed, hemat CPU
 
         if self.cap:
