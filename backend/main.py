@@ -487,6 +487,11 @@ MOTION_THRESHOLD = int(os.environ.get("MOTION_THRESHOLD", "1500000")) # total pi
 SETTLE_DELAY     = float(os.environ.get("SETTLE_DELAY", "0.6"))       # detik tunggu objek diam sebelum jepret
 CONF_THRESHOLD   = float(os.environ.get("CONF_THRESHOLD", "0"))       # 0 = TANPA batas: tiap objek langsung diproses apapun confidence-nya
 COOLDOWN_SEC     = float(os.environ.get("COOLDOWN_SEC", "3.0"))       # jeda saat TAK ada aktuasi (conf rendah / jepret gagal)
+# Debug: simpan frame yang PERSIS diklasifikasi ke file, biar keliatan "AI liat apa"
+# (bandingin blur/pencahayaan/background vs shot bersih di browser). SAVE_SHOT=0 matiin.
+SAVE_SHOT = os.environ.get("SAVE_SHOT", "1") == "1"
+SHOT_PATH = os.environ.get("SHOT_PATH", "last_shot.jpg")
+
 # Mode OBJEK (motion-gate 1x): pas objek masuk → jepret+analisis SEKALI, lalu tunggu
 # objek diangkat (scene sepi >= REARM_CLEAR_SEC) baru siap objek berikutnya. Cegah
 # analisis berulang objek yang sama & spam confidence-rendah.
@@ -591,6 +596,11 @@ class CameraWorker:
                         if ok2:
                             shot = f2
                     self.last_raw = shot
+                    if SAVE_SHOT:
+                        try:
+                            cv2.imwrite(SHOT_PATH, shot)  # frame yang diklasifikasi (debug)
+                        except Exception:
+                            pass
                     img = Image.fromarray(cv2.cvtColor(shot, cv2.COLOR_BGR2RGB))
                     try:
                         kategori, conf = _predict(img)
