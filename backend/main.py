@@ -485,7 +485,7 @@ except ImportError:
 CAMERA_INDEX     = int(os.environ.get("CAMERA_INDEX", "0"))           # 0 = kamera default Raspi
 MOTION_THRESHOLD = int(os.environ.get("MOTION_THRESHOLD", "1500000")) # total piksel berubah utk dianggap "ada objek"
 SETTLE_DELAY     = float(os.environ.get("SETTLE_DELAY", "0.6"))       # detik tunggu objek diam sebelum jepret
-CONF_THRESHOLD   = float(os.environ.get("CONF_THRESHOLD", "0.75"))    # confidence minimum utk aktuasi + lapor
+CONF_THRESHOLD   = float(os.environ.get("CONF_THRESHOLD", "0"))       # 0 = TANPA batas: tiap objek langsung diproses apapun confidence-nya
 COOLDOWN_SEC     = float(os.environ.get("COOLDOWN_SEC", "3.0"))       # jeda saat TAK ada aktuasi (conf rendah / jepret gagal)
 # Mode OBJEK (motion-gate 1x): pas objek masuk → jepret+analisis SEKALI, lalu tunggu
 # objek diangkat (scene sepi >= REARM_CLEAR_SEC) baru siap objek berikutnya. Cegah
