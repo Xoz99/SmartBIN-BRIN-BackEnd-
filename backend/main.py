@@ -487,9 +487,10 @@ MOTION_THRESHOLD = int(os.environ.get("MOTION_THRESHOLD", "1500000")) # total pi
 SETTLE_DELAY     = float(os.environ.get("SETTLE_DELAY", "0.6"))       # detik tunggu objek diam sebelum jepret
 CONF_THRESHOLD   = float(os.environ.get("CONF_THRESHOLD", "0.75"))    # confidence minimum utk aktuasi + lapor
 COOLDOWN_SEC     = float(os.environ.get("COOLDOWN_SEC", "3.0"))       # jeda saat TAK ada aktuasi (conf rendah / jepret gagal)
-# Mode INTERVAL: jepret + klasifikasi sekali tiap N detik (bukan motion-gate).
-# Lebih konsisten/nggak spam. Habis aktuasi, tunggu MAX(interval, durasi aktuator).
-CAPTURE_INTERVAL_SEC = float(os.environ.get("CAPTURE_INTERVAL_SEC", "8"))
+# Mode OBJEK (motion-gate 1x): pas objek masuk → jepret+analisis SEKALI, lalu tunggu
+# objek diangkat (scene sepi >= REARM_CLEAR_SEC) baru siap objek berikutnya. Cegah
+# analisis berulang objek yang sama & spam confidence-rendah.
+REARM_CLEAR_SEC  = float(os.environ.get("REARM_CLEAR_SEC", "2.0"))
 AUTO_START_CAM   = os.environ.get("AUTO_START_CAM", "1") == "1"       # default ON di Raspi (set 0 utk matikan)
 
 # Monitor kamera di dashboard: push frame TERAKHIR ke backend tiap CAMERA_PUSH_SEC
@@ -561,43 +562,69 @@ class CameraWorker:
             self.running = False
             return
 
-        print(f"[CAM] Kamera AKTIF (index {CAMERA_INDEX}) — mode INTERVAL: jepret tiap {CAPTURE_INTERVAL_SEC:.0f}s.")
-        next_capture = time.time() + CAPTURE_INTERVAL_SEC
+        print(f"[CAM] Kamera AKTIF (index {CAMERA_INDEX}) — mode OBJEK: jepret+analisis 1x tiap objek masuk.")
+        prev = None
+        armed = True          # siap analisis objek baru
+        clear_since = None    # sejak kapan scene sepi (buat re-arm)
 
         while self.running:
             ok, frame = self.cap.read()
             if not ok:
                 time.sleep(0.05)
                 continue
-            self.last_raw = frame  # frame terbaru buat feed monitor (dipush ke dashboard)
+            self.last_raw = frame  # frame terbaru buat feed monitor
 
+            gray = cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (21, 21), 0)
             now = time.time()
-            if now < next_capture:
-                time.sleep(0.03)   # ~30fps buat feed, belum waktunya jepret
-                continue
 
-            # ── Sekali tembak: klasifikasi frame saat ini ──
-            img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            try:
-                kategori, conf = _predict(img)
-            except Exception as e:
-                print(f"[CAM] gagal klasifikasi: {e}")
-                kategori, conf = None, 0.0
+            if prev is not None:
+                delta  = cv2.absdiff(prev, gray)
+                thresh = cv2.threshold(delta, 25, 255, cv2.THRESH_BINARY)[1]
+                has_object = int(thresh.sum()) > MOTION_THRESHOLD
 
-            wait = CAPTURE_INTERVAL_SEC
-            if kategori and conf >= CONF_THRESHOLD:
-                # kirim_ke_stm32 pakai serial `arduino` yang SUDAH dibuka (tak buka baru).
-                print(f"[CAM] ✓ {kategori} ({conf:.0%}) → aktuasi STM32 + lapor backend")
-                kirim_ke_stm32(kategori)
-                report_classification(kategori, conf)
-                self.last = {"kategori": kategori, "confidence": conf, "ts": now}
-                # Habis aktuasi, tunggu MAX(interval, durasi aktuator) biar jepret
-                # berikutnya nggak pas mekanik masih gerak.
-                wait = max(CAPTURE_INTERVAL_SEC, _actuator_lock_sec(kategori))
-            else:
-                print(f"[CAM] confidence rendah ({conf:.0%}) — dilewati")
+                if armed and has_object:
+                    # Objek masuk → tunggu diam → ambil SATU frame SEGAR → analisis 1x.
+                    time.sleep(SETTLE_DELAY)
+                    shot = frame
+                    for _ in range(3):
+                        ok2, f2 = self.cap.read()   # buang buffer basi, ambil frame segar
+                        if ok2:
+                            shot = f2
+                    self.last_raw = shot
+                    img = Image.fromarray(cv2.cvtColor(shot, cv2.COLOR_BGR2RGB))
+                    try:
+                        kategori, conf = _predict(img)
+                    except Exception as e:
+                        print(f"[CAM] gagal klasifikasi: {e}")
+                        kategori, conf = None, 0.0
 
-            next_capture = time.time() + wait
+                    if kategori and conf >= CONF_THRESHOLD:
+                        # kirim_ke_stm32 pakai serial `arduino` yang SUDAH dibuka (tak baru).
+                        print(f"[CAM] ✓ {kategori} ({conf:.0%}) → aktuasi STM32 + lapor backend")
+                        kirim_ke_stm32(kategori)
+                        report_classification(kategori, conf)
+                        self.last = {"kategori": kategori, "confidence": conf, "ts": now}
+                    else:
+                        print(f"[CAM] objek terdeteksi, confidence rendah ({conf:.0%}) — dilewati")
+
+                    armed = False        # jangan analisis lagi sampai objek diangkat
+                    clear_since = None
+                    prev = None          # reset baseline gerakan
+                    continue
+
+                if not armed:
+                    # Tunggu scene bersih (objek diangkat) → re-arm buat objek berikutnya.
+                    if not has_object:
+                        if clear_since is None:
+                            clear_since = now
+                        elif now - clear_since >= REARM_CLEAR_SEC:
+                            armed = True
+                            print("[CAM] siap objek berikutnya.")
+                    else:
+                        clear_since = None
+
+            prev = gray
+            time.sleep(0.03)  # ~30fps buat feed, hemat CPU
 
         if self.cap:
             self.cap.release()
