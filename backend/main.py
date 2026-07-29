@@ -79,6 +79,22 @@ NODE_ID      = os.environ.get("NODE_ID", "bin-003")
 FORWARD_MQTT = os.environ.get("FORWARD_MQTT", "1") == "1"
 FORWARD_LORA = os.environ.get("FORWARD_LORA", "1") == "1"
 
+# Log sensor ringkas: cetak tiap N bacaan (1=tiap bacaan, 5=lebih sepi). Kurangi spam.
+LOG_SENSOR_EVERY = int(os.environ.get("LOG_SENSOR_EVERY", "1"))
+
+
+def _sensor_summary(d: dict) -> str:
+    """Ringkasan 1-baris bacaan STM32 (bukan dump JSON kepotong yang bikin rancu).
+    'organik/anorganik/b3' di sini = KOMPARTEMEN sensor, BUKAN hasil deteksi kamera."""
+    try:
+        vols = "/".join(str((d.get(c) or {}).get("volume", "-")) for c in ("organik", "anorganik", "b3"))
+        berat = d.get("berat_g", "-")
+        batt = (d.get("battery") or {}).get("percent", "-")
+        gps = "fix" if (d.get("sat") or 0) > 0 else "-"
+        return f"berat={berat}g laci(O/A/B3)={vols}% batt={batt}% gps={gps}"
+    except Exception:
+        return ""
+
 # --- Jalur perbandingan HTTP (penelitian LoRa vs HTTP) ---
 # COMPARE_HTTP=1 → tiap bacaan STM32 JUGA di-POST langsung ke server (transport=http),
 # selain lewat LoRa (transport=lora, ditandai gateway RX). seq+sentAt disuntik ke tiap
@@ -239,7 +255,8 @@ def _serial_dispatcher_loop():
                     except queue.Full:
                         pass  # backend lama down → buang, jangan sumbat baca STM32
 
-                print(f"[Dispatcher] seq={_seq_counter} {fwd[:72]}")
+                if LOG_SENSOR_EVERY > 0 and _seq_counter % LOG_SENSOR_EVERY == 0:
+                    print(f"[STM32] seq={_seq_counter} | {_sensor_summary(data)}")
         except Exception as e:
             print(f"[Dispatcher] Error baca STM32: {e}")
             time.sleep(1)
