@@ -503,6 +503,7 @@ DATASET_LABEL   = os.environ.get("DATASET_LABEL", "unsorted")
 # Deteksi objek DI ATAS platform (buletan merah): fokus ROI tengah + bandingkan dgn
 # kondisi KOSONG (baseline). Cuma analisis kalau ada objek nutupin platform & sudah
 # diam, SEKALI per objek. Nilai = rata-rata beda piksel (0-255). Sesuaikan via env.
+CAMERA_WARMUP_SEC = float(os.environ.get("CAMERA_WARMUP_SEC", "2.0"))  # tunggu kamera settle (auto-exposure) sebelum ambil baseline → cegah false-trigger di awal
 ROI_FRAC    = float(os.environ.get("ROI_FRAC", "0.6"))    # fraksi tengah frame (area buletan) yg dipantau+diklasifikasi
 OBJECT_DIFF = float(os.environ.get("OBJECT_DIFF", "18"))  # beda dari kosong utk dianggap ADA objek (naikin kalau sering false)
 CLEAR_DIFF  = float(os.environ.get("CLEAR_DIFF", "9"))    # beda di bawah ini = platform kosong lagi → re-arm
@@ -602,6 +603,7 @@ class CameraWorker:
         armed = True
         still = 0
         rearm_at = 0.0        # waktu boleh re-arm (setelah aktuator selesai)
+        warmup_until = time.time() + CAMERA_WARMUP_SEC  # settle auto-exposure dulu
 
         while self.running:
             ok, frame = self.cap.read()
@@ -609,6 +611,12 @@ class CameraWorker:
                 time.sleep(0.05)
                 continue
             self.last_raw = frame  # frame penuh buat feed monitor
+
+            # Warmup: kamera settle dulu sebelum ambil baseline & mulai deteksi,
+            # supaya frame gelap/nyetel di awal tak dikira "objek" → gerak sendiri.
+            if time.time() < warmup_until:
+                time.sleep(0.03)
+                continue
 
             roi = _center_roi(frame, ROI_FRAC)
             gray = cv2.GaussianBlur(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY), (21, 21), 0)
