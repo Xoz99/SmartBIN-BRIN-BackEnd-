@@ -492,6 +492,14 @@ COOLDOWN_SEC     = float(os.environ.get("COOLDOWN_SEC", "3.0"))       # jeda saa
 SAVE_SHOT = os.environ.get("SAVE_SHOT", "1") == "1"
 SHOT_PATH = os.environ.get("SHOT_PATH", "last_shot.jpg")
 
+# Mode KUMPULIN DATASET (buat retrain model): tiap objek yang di-capture disimpan ke
+# dataset/<DATASET_LABEL>/<timestamp>.jpg. Set DATASET_LABEL = jenis yang lagi ditaruh
+# (organik/anorganik/b3) biar langsung ter-label benar. Ganti label → restart.
+#   DATASET_CAPTURE=1 DATASET_LABEL=anorganik python3 main.py
+DATASET_CAPTURE = os.environ.get("DATASET_CAPTURE", "0") == "1"
+DATASET_DIR     = os.environ.get("DATASET_DIR", "dataset")
+DATASET_LABEL   = os.environ.get("DATASET_LABEL", "unsorted")
+
 # Deteksi objek DI ATAS platform (buletan merah): fokus ROI tengah + bandingkan dgn
 # kondisi KOSONG (baseline). Cuma analisis kalau ada objek nutupin platform & sudah
 # diam, SEKALI per objek. Nilai = rata-rata beda piksel (0-255). Sesuaikan via env.
@@ -631,6 +639,15 @@ class CameraWorker:
                                 cv2.imwrite(SHOT_PATH, shot)  # frame penuh yang diklasifikasi
                             except Exception:
                                 pass
+                        if DATASET_CAPTURE:
+                            try:
+                                ddir = os.path.join(DATASET_DIR, DATASET_LABEL)
+                                os.makedirs(ddir, exist_ok=True)
+                                fn = os.path.join(ddir, f"{int(time.time() * 1000)}.jpg")
+                                cv2.imwrite(fn, shot)
+                                print(f"[Dataset] +1 ({DATASET_LABEL}) → {fn}")
+                            except Exception as e:
+                                print(f"[Dataset] gagal simpan: {e}")
                         # Klasifikasi FRAME PENUH (bukan crop ROI) — model lebih akurat
                         # dgn framing penuh, sama seperti sim browser. ROI cuma dipakai
                         # untuk DETEKSI kapan ada objek di platform, bukan input model.
