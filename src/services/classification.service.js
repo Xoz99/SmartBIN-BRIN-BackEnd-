@@ -52,6 +52,41 @@ export async function getClassificationSummary({ from, to, binId, areaId } = {})
 }
 
 /**
+ * Jumlah klasifikasi (sampah terpilah) per hari, N hari terakhir, KONTINU
+ * (selalu N titik, hari ini paling kanan). Untuk grafik "Sampah Terpilah 7 Hari".
+ * Data ini reliable (dari kamera) — beda dari berat yang bergantung load cell.
+ * @param {number} days
+ * @returns {Promise<Array<{day:string, count:number}>>}
+ */
+export async function getWeeklyClassifications(days = 7) {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - (days - 1));
+
+    const rows = await prisma.classification.findMany({
+        where: { createdAt: { gte: start } },
+        select: { createdAt: true },
+    });
+
+    const map = new Map();
+    for (const r of rows) {
+        const dt = new Date(r.createdAt);
+        const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+        map.set(key, (map.get(key) ?? 0) + 1);
+    }
+
+    const out = [];
+    for (let i = days - 1; i >= 0; i--) {
+        const d = new Date();
+        d.setHours(0, 0, 0, 0);
+        d.setDate(d.getDate() - i);
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        out.push({ day: key, count: map.get(key) ?? 0 });
+    }
+    return out;
+}
+
+/**
  * Daftar klasifikasi TERBARU (tiap deteksi kamera/pemilah) — untuk panel
  * "Jenis Sampah Terdeteksi" di Analitik. Beda dari deposit: classification
  * tercatat SETIAP deteksi (tak butuh pairing berat).
