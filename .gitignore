@@ -25,3 +25,4 @@ Thumbs.db
 # Docker
 .dockerignore
 backend/.env
+backend/model_keras_ai/
