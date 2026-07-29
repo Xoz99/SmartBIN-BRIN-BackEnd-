@@ -504,6 +504,7 @@ DATASET_LABEL   = os.environ.get("DATASET_LABEL", "unsorted")
 # kondisi KOSONG (baseline). Cuma analisis kalau ada objek nutupin platform & sudah
 # diam, SEKALI per objek. Nilai = rata-rata beda piksel (0-255). Sesuaikan via env.
 CAMERA_WARMUP_SEC = float(os.environ.get("CAMERA_WARMUP_SEC", "2.0"))  # tunggu kamera settle (auto-exposure) sebelum ambil baseline → cegah false-trigger di awal
+IDLE_LOG_SEC = float(os.environ.get("IDLE_LOG_SEC", "15"))  # interval log "menunggu objek" saat platform kosong (biar keliatan hidup, tak spam)
 ROI_FRAC    = float(os.environ.get("ROI_FRAC", "0.6"))    # fraksi tengah frame (area buletan) yg dipantau+diklasifikasi
 OBJECT_DIFF = float(os.environ.get("OBJECT_DIFF", "18"))  # beda dari kosong utk dianggap ADA objek (naikin kalau sering false)
 CLEAR_DIFF  = float(os.environ.get("CLEAR_DIFF", "9"))    # beda di bawah ini = platform kosong lagi → re-arm
@@ -604,6 +605,10 @@ class CameraWorker:
         still = 0
         rearm_at = 0.0        # waktu boleh re-arm (setelah aktuator selesai)
         warmup_until = time.time() + CAMERA_WARMUP_SEC  # settle auto-exposure dulu
+        n_obj = 0             # nomor urut objek yang sudah diproses
+        detecting = False     # objek lagi diamati (buat log "objek masuk" sekali)
+        idle_log_at = 0.0     # waktu berikutnya log "menunggu objek"
+        warmed = False        # sudah lewat warmup (buat log sekali)
 
         while self.running:
             ok, frame = self.cap.read()
@@ -615,6 +620,9 @@ class CameraWorker:
             # Warmup: kamera settle dulu sebelum ambil baseline & mulai deteksi,
             # supaya frame gelap/nyetel di awal tak dikira "objek" → gerak sendiri.
             if time.time() < warmup_until:
+                if not warmed:
+                    print(f"[CAM] ⏳ Warmup {CAMERA_WARMUP_SEC:.0f}s — kamera menyala & settle (pastikan buletan KOSONG)...")
+                    warmed = True
                 time.sleep(0.03)
                 continue
 
@@ -624,6 +632,8 @@ class CameraWorker:
             if baseline is None:
                 baseline = gray       # anggap platform kosong saat start
                 prev_roi = gray
+                idle_log_at = time.time() + IDLE_LOG_SEC
+                print("[CAM] ✅ Baseline platform KOSONG diambil — SIAP, menunggu objek di buletan...")
                 time.sleep(0.03)
                 continue
 
@@ -634,8 +644,12 @@ class CameraWorker:
             if armed:
                 # Objek nutupin platform (beda dari kosong) DAN sudah diam beberapa frame.
                 if obj_diff > OBJECT_DIFF and move < STILL_MOVE:
+                    if not detecting:
+                        detecting = True
+                        print(f"[CAM] 👀 Objek MASUK buletan (obj_diff={obj_diff:.0f} > {OBJECT_DIFF:.0f}) — tunggu diam...")
                     still += 1
                     if still >= STILL_NEED:
+                        detecting = False
                         shot = frame
                         for _ in range(2):
                             ok2, f2 = self.cap.read()   # ambil frame segar
@@ -666,20 +680,32 @@ class CameraWorker:
                             print(f"[CAM] gagal klasifikasi: {e}")
                             kategori, conf = None, 0.0
 
+                        n_obj += 1
                         if kategori and conf >= CONF_THRESHOLD:
-                            print(f"[CAM] ✓ {kategori} ({conf:.0%}) → aktuasi STM32 + lapor backend")
+                            print(f"[CAM] #{n_obj} ✓ {kategori} ({conf:.0%}) → aktuasi STM32 + lapor backend")
                             kirim_ke_stm32(kategori)
                             report_classification(kategori, conf)
                             self.last = {"kategori": kategori, "confidence": conf, "ts": time.time()}
                         else:
-                            print(f"[CAM] objek di platform, confidence rendah ({conf:.0%}) — dilewati")
+                            print(f"[CAM] #{n_obj} objek di platform, confidence rendah ({conf:.0%}) — dilewati")
 
                         armed = False    # tunggu aktuator selesai jatuhin objek
                         still = 0
                         # Re-arm setelah aktuator kelar (objek jatuh & platform reset).
-                        rearm_at = time.time() + _actuator_lock_sec(kategori) + REARM_BUFFER
+                        wait_s = _actuator_lock_sec(kategori) + REARM_BUFFER
+                        rearm_at = time.time() + wait_s
+                        print(f"[CAM] ⏳ tunggu aktuator ~{wait_s:.1f}s (objek jatuh + mekanik reset)...")
                 else:
+                    if detecting:
+                        # objek keburu pindah/goyang sebelum diam → batal, tunggu lagi
+                        detecting = False
+                        print(f"[CAM] objek belum diam / pindah (obj_diff={obj_diff:.0f}) — tunggu lagi...")
                     still = 0
+                    # Heartbeat: platform kosong & siap. Log tiap IDLE_LOG_SEC biar
+                    # keliatan sistem hidup tanpa spam tiap frame.
+                    if time.time() >= idle_log_at:
+                        print(f"[CAM] … menunggu objek (platform kosong, obj_diff={obj_diff:.0f})")
+                        idle_log_at = time.time() + IDLE_LOG_SEC
             else:
                 # Re-arm berbasis WAKTU: setelah aktuator selesai, anggap objek sudah
                 # jatuh & platform reset → siap objek baru + perbarui baseline ke kondisi
@@ -688,7 +714,8 @@ class CameraWorker:
                 if time.time() >= rearm_at:
                     armed = True
                     baseline = gray
-                    print("[CAM] siap objek berikutnya.")
+                    idle_log_at = time.time() + IDLE_LOG_SEC
+                    print(f"[CAM] ✅ Platform kosong lagi — SIAP objek berikutnya (#{n_obj + 1}).")
 
             time.sleep(0.03)  # ~30fps buat feed, hemat CPU
 
