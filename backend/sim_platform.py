@@ -31,6 +31,7 @@ STILL_MOVE   = 4.0    # gerak antar-frame di bawah ini = objek diam
 STILL_NEED   = 3
 REARM_BUFFER = 1.5
 CONF_THRESHOLD = 0.0  # 0 = tanpa batas (sama default main.py)
+CAMERA_WARMUP_SEC = 2.0  # kamera settle dulu sebelum ambil baseline (cegah gerak sendiri di awal)
 ACT_TIME = {"organik": 7.0, "anorganik": 8.0, "b3": 9.5}
 
 CLASS = ["Anorganik", "B3", "Organik"]
@@ -68,6 +69,7 @@ def main():
     still = 0
     rearm_at = 0.0
     last = None  # (label, conf)
+    warmup_until = time.time() + CAMERA_WARMUP_SEC
 
     print("SIMULASI mode PLATFORM. Pastikan KOTAK kosong dulu (baseline). B=re-baseline, Q=keluar.")
     while True:
@@ -77,6 +79,17 @@ def main():
         roi, (x0, y0, s) = center_roi(frame, ROI_FRAC)
         gray = cv2.GaussianBlur(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY), (21, 21), 0)
         now = time.time()
+
+        # ── WARMUP: kamera settle dulu, belum deteksi (baseline diambil setelah ini) ──
+        if now < warmup_until:
+            cv2.rectangle(frame, (x0, y0), (x0 + s, y0 + s), (200, 200, 200), 2)
+            cv2.putText(frame, f"MENYALA... warmup {warmup_until - now:.0f}s (kotak kosong)",
+                        (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+            cv2.imshow("SIMULASI EcoSort — B=baseline, Q=keluar", frame)
+            if (cv2.waitKey(1) & 0xFF) == ord("q"):
+                break
+            baseline = None  # baseline diambil dari frame pertama SETELAH warmup
+            continue
 
         obj_diff = move = 0.0
         if baseline is None:
