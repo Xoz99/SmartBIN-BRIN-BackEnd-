@@ -500,6 +500,7 @@ OBJECT_DIFF = float(os.environ.get("OBJECT_DIFF", "18"))  # beda dari kosong utk
 CLEAR_DIFF  = float(os.environ.get("CLEAR_DIFF", "9"))    # beda di bawah ini = platform kosong lagi → re-arm
 STILL_MOVE  = float(os.environ.get("STILL_MOVE", "4"))    # gerak antar-frame di bawah ini = objek sudah diam
 STILL_NEED  = int(os.environ.get("STILL_NEED", "3"))      # butuh N frame diam berturut sebelum jepret
+REARM_BUFFER = float(os.environ.get("REARM_BUFFER", "1.5"))  # jeda ekstra setelah aktuator selesai sebelum siap objek baru
 
 
 def _center_roi(frame, frac):
@@ -592,6 +593,7 @@ class CameraWorker:
         prev_roi = None       # ROI frame sebelumnya (deteksi gerak)
         armed = True
         still = 0
+        rearm_at = 0.0        # waktu boleh re-arm (setelah aktuator selesai)
 
         while self.running:
             ok, frame = self.cap.read()
@@ -645,16 +647,21 @@ class CameraWorker:
                         else:
                             print(f"[CAM] objek di platform, confidence rendah ({conf:.0%}) — dilewati")
 
-                        armed = False    # tunggu objek diangkat
+                        armed = False    # tunggu aktuator selesai jatuhin objek
                         still = 0
+                        # Re-arm setelah aktuator kelar (objek jatuh & platform reset).
+                        rearm_at = time.time() + _actuator_lock_sec(kategori) + REARM_BUFFER
                 else:
                     still = 0
             else:
-                # Objek diangkat → platform balik kosong → re-arm + perbarui baseline.
-                if obj_diff < CLEAR_DIFF:
+                # Re-arm berbasis WAKTU: setelah aktuator selesai, anggap objek sudah
+                # jatuh & platform reset → siap objek baru + perbarui baseline ke kondisi
+                # platform SEKARANG (kosong, walau posisi sedikit bergeser). Lebih robust
+                # daripada nunggu tampilan balik PERSIS ke baseline lama.
+                if time.time() >= rearm_at:
                     armed = True
                     baseline = gray
-                    print("[CAM] platform kosong — siap objek berikutnya.")
+                    print("[CAM] siap objek berikutnya.")
 
             time.sleep(0.03)  # ~30fps buat feed, hemat CPU
 
