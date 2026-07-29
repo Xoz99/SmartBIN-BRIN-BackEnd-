@@ -1,6 +1,5 @@
 import { upsertSnapshot, getRecentSnapshots, dayKey } from '../models/snapshot.model.js';
 import { sumWeightPerDay } from '../models/deposit.model.js';
-import { maxWeightPerDay } from '../models/sensorLog.model.js';
 import { getAllZona } from './prediksi.service.js';
 import { logger } from '../utils/logger.js';
 
@@ -57,8 +56,7 @@ export async function backfillSnapshots(days = 7) {
 export async function getWeeklyVolume(days = 7) {
     const snaps = await getRecentSnapshots(days);
     const snapMap = new Map(snaps.map((s) => [s.day, s.totalKg]));
-    const perDay = await sumWeightPerDay(days);     // deposit
-    const sensorPerDay = await maxWeightPerDay(days); // fallback sensor_logs
+    const perDay = await sumWeightPerDay(days);     // deposit (berat sortir sah)
 
     const out = [];
     for (let i = days - 1; i >= 0; i--) {
@@ -68,9 +66,10 @@ export async function getWeeklyVolume(days = 7) {
         const key = dayKey(d);
         const snapKg = snapMap.get(key) ?? 0;
         const depKg = Math.round(perDay.get(key) ?? 0);
-        const senKg = Math.round(sensorPerDay.get(key) ?? 0);
-        // Berjenjang: snapshot → deposit → sensor_logs.
-        out.push({ day: key, totalKg: snapKg > 0 ? snapKg : (depKg > 0 ? depKg : senKg) });
+        // snapshot zona → fallback berat deposit. TIDAK pakai sensor_logs mentah:
+        // load cell (HX711) sering belum di-tare → spike liar (mis. 141 kg) bikin
+        // grafik ngaco. Grafik terisi kalau deposit/snapshot ada (berat sah).
+        out.push({ day: key, totalKg: snapKg > 0 ? snapKg : depKg });
     }
     return out;
 }
