@@ -625,14 +625,16 @@ class CameraWorker:
                             ok2, f2 = self.cap.read()   # ambil frame segar
                             if ok2:
                                 shot = f2
-                        shot_roi = _center_roi(shot, ROI_FRAC)
                         self.last_raw = shot
                         if SAVE_SHOT:
                             try:
-                                cv2.imwrite(SHOT_PATH, shot_roi)  # yang PERSIS diklasifikasi
+                                cv2.imwrite(SHOT_PATH, shot)  # frame penuh yang diklasifikasi
                             except Exception:
                                 pass
-                        img = Image.fromarray(cv2.cvtColor(shot_roi, cv2.COLOR_BGR2RGB))
+                        # Klasifikasi FRAME PENUH (bukan crop ROI) — model lebih akurat
+                        # dgn framing penuh, sama seperti sim browser. ROI cuma dipakai
+                        # untuk DETEKSI kapan ada objek di platform, bukan input model.
+                        img = Image.fromarray(cv2.cvtColor(shot, cv2.COLOR_BGR2RGB))
                         try:
                             kategori, conf = _predict(img)
                         except Exception as e:
