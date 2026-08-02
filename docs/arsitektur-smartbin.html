@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arsitektur Sistem SmartBIN-BRIN</title>
+<style>
+  :root {
+    --bg: #f5f8f4; --surface: #ffffff; --ink: #1c281f; --muted: #5b6a5f;
+    --line: #dde5dd; --accent: #3f7a5c; --accent-soft: #e6f0e9;
+    --panel: #ffffff; --panel-line: #e3e8e2;
+    --shadow: 0 1px 2px rgba(28,40,31,.06), 0 8px 30px rgba(28,40,31,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12180f; --surface: #1a2118; --ink: #e9efe8; --muted: #9cae9f;
+      --line: #2a352a; --accent: #6fbf95; --accent-soft: #1e2c22;
+      --panel: #f7f9f6; --panel-line: #e3e8e2;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 34px rgba(0,0,0,.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.55; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 40px 24px 72px; }
+  header { border-bottom: 1px solid var(--line); padding-bottom: 22px; margin-bottom: 30px; }
+  .eyebrow {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600; margin: 0 0 10px;
+  }
+  h1 { font-size: clamp(1.7rem, 4vw, 2.4rem); line-height: 1.1; margin: 0 0 8px; letter-spacing: -.02em; }
+  .sub { color: var(--muted); font-size: 1.02rem; margin: 0; max-width: 62ch; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 22px 0 0; padding: 0; list-style: none; }
+  .legend li { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .dot { width: 11px; height: 11px; border-radius: 3px; flex: none; border: 1px solid rgba(0,0,0,.12); }
+  .d-edge { background: #cfe6d7; } .d-lora { background: #f2d5aa; } .d-http { background: #cfe0f1; }
+  .d-mqtt { background: #ddcfec; } .d-gw { background: #c9e8e8; } .d-be { background: #dde1e8; } .d-fe { background: #d7d5f0; }
+  h2.section { font-size: 1.3rem; margin: 52px 0 6px; letter-spacing: -.01em; }
+  h2.section + .lead { color: var(--muted); margin: 0 0 20px; max-width: 66ch; }
+  figure { margin: 0; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--panel-line); border-radius: 14px;
+    box-shadow: var(--shadow); padding: 22px 18px; overflow-x: auto;
+  }
+  .mermaid { min-width: 680px; }
+  figcaption {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; color: var(--muted); margin-top: 12px;
+  }
+  figcaption b { color: var(--ink); font-weight: 600; }
+  .flow { margin-top: 26px; display: grid; gap: 14px; }
+  .flow h3.grp { font-size: 1.05rem; margin: 6px 0 2px; }
+  .step {
+    display: grid; grid-template-columns: 34px 1fr; gap: 16px; align-items: start;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px;
+  }
+  .num {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; font-size: 13px;
+    color: var(--accent); background: var(--accent-soft); border-radius: 8px; height: 30px; width: 30px;
+    display: grid; place-items: center;
+  }
+  .step h4 { margin: 2px 0 5px; font-size: 1rem; }
+  .step p { margin: 0; color: var(--muted); font-size: .93rem; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .84em;
+    background: var(--accent-soft); color: var(--accent); padding: 1px 5px; border-radius: 4px;
+  }
+  .note {
+    margin-top: 26px; border-left: 3px solid var(--accent); background: var(--accent-soft);
+    padding: 14px 18px; border-radius: 0 10px 10px 0; font-size: .93rem; color: var(--ink);
+  }
+  .note b { color: var(--accent); }
+  footer {
+    margin-top: 48px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted);
+    font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">SmartBIN-BRIN · Arsitektur Sistem</p>
+    <h1>Alur Data Tempat Sampah Pintar Pemilah Otomatis</h1>
+    <p class="sub">Dari sensor di lapangan, dua jalur transmisi (LoRa &amp; HTTP untuk perbandingan riset), sampai dasbor pemantauan realtime.</p>
+    <ul class="legend">
+      <li><span class="dot d-edge"></span> Perangkat &amp; sensor</li>
+      <li><span class="dot d-lora"></span> Jalur LoRa (923 MHz)</li>
+      <li><span class="dot d-http"></span> Jalur HTTP/HTTPS</li>
+      <li><span class="dot d-mqtt"></span> MQTT (HiveMQ)</li>
+      <li><span class="dot d-gw"></span> Gateway</li>
+      <li><span class="dot d-be"></span> Backend</li>
+      <li><span class="dot d-fe"></span> Frontend</li>
+    </ul>
+  </header>
+
+  <h2 class="section">1 · Arsitektur end-to-end</h2>
+  <p class="lead">Alur menyeluruh dari perangkat lapangan hingga antarmuka pengguna.</p>
+  <figure>
+    <div class="panel">
+      <pre class="mermaid">
+flowchart TB
+  subgraph EDGE["EDGE — Smart Bins (perangkat lapangan)"]
+    direction TB
+    subgraph BIN3["bin-003 (berbasis Raspberry Pi)"]
+      STM["STM32 EcoSort<br/>Ultrasonik O/A/B3 · Load cell · Baterai · GPS"]
+      PI["Raspberry Pi — main.py (FastAPI)<br/>Kamera AI: OpenCV + TFLite EfficientNet-B3"]
+      STM -->|"Serial JSON"| PI
+      PI -->|"perintah aktuasi"| STM
+    end
+    subgraph BIN2["bin-002 (berbasis ESP32)"]
+      ESP["ESP32<br/>DHT22 · MQ135 · VL53L0X · GPS M10 · HX711"]
+    end
+  end
+
+  LT3["LoRa32 TX — bin-003"]
+  LT2["LoRa32 TX — bin-002"]
+  CORE["LoRa Core RX<br/>923 MHz · SF7 · chunk D| + ACK"]
+  HIVE["HiveMQ Cloud<br/>MQTT TLS 8883"]
+
+  PI -->|"LoRa serial"| LT3
+  ESP -->|"UART"| LT2
+  LT3 -->|"RF 923 MHz"| CORE
+  LT2 -->|"RF 923 MHz"| CORE
+
+  subgraph GW["GATEWAY — Raspberry Pi RX"]
+    GWU["gateway_unified.py<br/>normalisasi payload · tandai transport"]
+  end
+  CORE -->|"Serial SENSOR:node:json"| GWU
+
+  subgraph BE["BACKEND — VPS smartbin.sbs (Docker Compose)"]
+    CADDY["Caddy<br/>reverse proxy · HTTPS Let's Encrypt"]
+    API["Express API + Prisma ORM<br/>/ingest · /camera · /bins · /analytics · /auth"]
+    WSV["WebSocket broadcast (realtime)"]
+    PRED["Predict service (Python)"]
+    PG[("PostgreSQL")]
+    RD[("Redis")]
+    CADDY --> API
+    API --> PG
+    API --> RD
+    API --> WSV
+    API --> PRED
+  end
+
+  GWU -->|"POST /ingest/sensor · transport=lora"| CADDY
+  PI  -->|"POST /ingest/sensor · transport=http (Tailscale)"| CADDY
+  PI  -->|"POST /camera/frame + hasil klasifikasi"| CADDY
+  ESP -->|"HTTPS /ingest/sensor · transport=http"| CADDY
+  ESP -->|"MQTT TLS"| HIVE
+  PI  -.->|"MQTT (opsional)"| HIVE
+  HIVE -->|"subscribe"| API
+
+  subgraph FE["FRONTEND — Vercel (Next.js)"]
+    DASH["Dashboard status bin"]
+    MAP["Peta GPS (react-leaflet)"]
+    CAMV["Monitor kamera + overlay deteksi"]
+    ANA["Analitik: LoRa vs HTTP · sampah terpilah"]
+  end
+  API -->|"REST"| DASH
+  API --> MAP
+  API --> CAMV
+  API --> ANA
+  WSV -->|"realtime push"| FE
+
+  classDef edge fill:#dcefe2,stroke:#4f8a6b,color:#1f3b2c;
+  classDef lora fill:#f6e2c4,stroke:#c98a3c,color:#5a3a12;
+  classDef mqtt fill:#e7dbf1,stroke:#8a6bb0,color:#3d2a55;
+  classDef gw fill:#d4ecec,stroke:#3f9797,color:#123c3c;
+  classDef be fill:#e4e7ee,stroke:#5b6472,color:#252b34;
+  classDef store fill:#dfe2e8,stroke:#8a92a0,color:#2a2f37;
+  classDef fe fill:#e0def4,stroke:#6b64c0,color:#2a2755;
+
+  class STM,PI,ESP edge;
+  class LT3,LT2,CORE lora;
+  class HIVE mqtt;
+  class GWU gw;
+  class CADDY,API,WSV,PRED be;
+  class PG,RD store;
+  class DASH,MAP,CAMV,ANA fe;
+      </pre>
+    </div>
+    <figcaption><b>Gambar 1.</b> Arsitektur end-to-end SmartBIN-BRIN — perangkat lapangan → transmisi → gateway → backend → antarmuka.</figcaption>
+  </figure>
+
+  <div class="flow">
+    <div class="step"><div class="num">1</div><div>
+      <h4>Perangkat lapangan (Edge)</h4>
+      <p><b>bin-003</b>: STM32 baca sensor → kirim JSON via serial ke Raspberry Pi. Pi menjalankan kamera + model <code>EfficientNet-B3 (TFLite)</code> untuk klasifikasi jenis sampah, lalu memerintahkan STM32 mengaktuasi pemilah. <b>bin-002</b>: ESP32 membaca sensornya sendiri tanpa Raspberry Pi.</p>
+    </div></div>
+    <div class="step"><div class="num">2</div><div>
+      <h4>Transmisi — dua jalur untuk perbandingan riset</h4>
+      <p>Tiap bacaan dikirim lewat <b>LoRa</b> (→ board LoRa32 TX → RF 923 MHz → LoRa Core RX) <b>dan</b> <b>HTTP</b> (langsung ke server). Nilai <code>seq</code> yang sama dipakai di kedua jalur agar packet loss &amp; latensi tiap paket dapat dibandingkan adil. MQTT (HiveMQ) sebagai jalur tambahan.</p>
+    </div></div>
+    <div class="step"><div class="num">3</div><div>
+      <h4>Gateway (Raspberry Pi RX)</h4>
+      <p><code>gateway_unified.py</code> menerima paket LoRa dari Core RX, menyusun ulang JSON, menandai <code>transport</code>, lalu meneruskan ke backend via <code>POST /ingest/sensor</code>.</p>
+    </div></div>
+    <div class="step"><div class="num">4</div><div>
+      <h4>Backend (VPS smartbin.sbs)</h4>
+      <p>Docker Compose: Caddy (HTTPS otomatis) → Express + Prisma. Data di PostgreSQL, cache di Redis, event realtime lewat WebSocket, layanan <i>predict</i> terpisah. Backend juga berlangganan MQTT dari HiveMQ.</p>
+    </div></div>
+    <div class="step"><div class="num">5</div><div>
+      <h4>Frontend (Vercel · Next.js)</h4>
+      <p>Dasbor status tiap bin, peta lokasi via GPS, monitor kamera dengan overlay deteksi, dan analitik LoRa vs HTTP serta jumlah sampah terpilah — diperbarui realtime lewat WebSocket.</p>
+    </div></div>
+  </div>
+
+  <h2 class="section">2 · Detail proses Kamera AI (mode PLATFORM)</h2>
+  <p class="lead">Siklus deteksi objek di tatakan/buletan pemilah — berjalan di <code>main.py</code> pada Raspberry Pi bin-003. Satu objek diproses satu kali, lalu sistem menunggu aktuator selesai sebelum siap objek berikutnya.</p>
+  <figure>
+    <div class="panel">
+      <pre class="mermaid">
+flowchart TB
+  START(["Kamera nyala"]) --> WARM["Warmup kamera<br/>settle auto-exposure (CAMERA_WARMUP_SEC)"]
+  WARM --> BASE["Ambil BASELINE<br/>tatakan/buletan KOSONG jadi acuan (ROI_FRAC)"]
+  BASE --> READ["Baca frame → area ROI tengah<br/>hitung obj_diff (beda dari baseline) &amp; move (gerak)"]
+  READ --> Q1{"obj_diff &gt; OBJECT_DIFF<br/>DAN move &lt; STILL_MOVE ?"}
+  Q1 -- "tidak · platform kosong" --> WAIT["Menunggu objek<br/>(log tiap IDLE_LOG_SEC)"]
+  WAIT --> READ
+  Q1 -- "ya · ada objek" --> STILLQ{"objek diam ≥ STILL_NEED frame ?"}
+  STILLQ -- "belum" --> READ
+  STILLQ -- "ya" --> SHOT["Jepret frame penuh"]
+  SHOT --> CLS["Klasifikasi TFLite EfficientNet-B3<br/>→ kategori + confidence"]
+  CLS --> CONFQ{"confidence ≥ CONF_THRESHOLD ?"}
+  CONFQ -- "tidak" --> SKIP["Lewati<br/>(log confidence rendah)"]
+  CONFQ -- "ya" --> ACT["Kirim kategori → STM32 (aktuasi pemilah)<br/>+ lapor klasifikasi ke backend"]
+  SKIP --> DISARM
+  ACT --> DISARM["Tunggu aktuator selesai<br/>ACTUATOR_SEC_&lt;kategori&gt; + REARM_BUFFER<br/>(objek jatuh, pemilah reset)"]
+  DISARM --> REARM["Re-arm: ambil BASELINE baru<br/>platform kosong lagi → SIAP objek berikutnya"]
+  REARM --> READ
+
+  classDef se fill:#dcefe2,stroke:#4f8a6b,color:#1f3b2c;
+  classDef proc fill:#e4e7ee,stroke:#5b6472,color:#252b34;
+  classDef dec fill:#f6e2c4,stroke:#c98a3c,color:#5a3a12;
+  classDef ai fill:#d4ecec,stroke:#3f9797,color:#123c3c;
+  classDef act fill:#cfe6d7,stroke:#3f7a5c,color:#1f3b2c;
+  classDef wait fill:#eceef1,stroke:#98a0ac,color:#3a3f47;
+
+  class START,WARM,BASE se;
+  class READ,SHOT proc;
+  class Q1,STILLQ,CONFQ dec;
+  class CLS ai;
+  class ACT,DISARM,REARM act;
+  class WAIT,SKIP wait;
+      </pre>
+    </div>
+    <figcaption><b>Gambar 2.</b> Siklus deteksi &amp; klasifikasi kamera AI — baseline → deteksi objek → klasifikasi → aktuasi → re-arm.</figcaption>
+  </figure>
+
+  <div class="flow">
+    <div class="step"><div class="num">1</div><div>
+      <h4>Warmup</h4>
+      <p>Kamera dinyalakan lalu dibiarkan settle (auto-exposure) selama <code>CAMERA_WARMUP_SEC</code>. Mencegah frame gelap di awal dikira objek → gerak sendiri.</p>
+    </div></div>
+    <div class="step"><div class="num">2</div><div>
+      <h4>Baseline</h4>
+      <p>Sistem memotret tatakan/buletan dalam kondisi <b>KOSONG</b> sebagai acuan. Area yang dipantau ditentukan <code>ROI_FRAC</code> (fraksi tengah frame = lingkaran pemilah).</p>
+    </div></div>
+    <div class="step"><div class="num">3</div><div>
+      <h4>Deteksi objek</h4>
+      <p>Tiap frame dihitung <code>obj_diff</code> (beda dari baseline) dan <code>move</code> (gerak antar-frame). Objek dianggap ada bila <code>obj_diff &gt; OBJECT_DIFF</code> dan diam (<code>move &lt; STILL_MOVE</code>). Saat kosong, log “menunggu objek” tiap <code>IDLE_LOG_SEC</code>.</p>
+    </div></div>
+    <div class="step"><div class="num">4</div><div>
+      <h4>Konfirmasi diam</h4>
+      <p>Butuh <code>STILL_NEED</code> frame diam berturut sebelum menjepret — menghindari motion blur &amp; deteksi setengah jatuh.</p>
+    </div></div>
+    <div class="step"><div class="num">5</div><div>
+      <h4>Klasifikasi</h4>
+      <p>Frame penuh dijepret → model <code>TFLite EfficientNet-B3</code> menghasilkan kategori (Organik / Anorganik / B3) + confidence. <code>CONF_THRESHOLD</code> menyaring (0 = semua diproses).</p>
+    </div></div>
+    <div class="step"><div class="num">6</div><div>
+      <h4>Aktuasi</h4>
+      <p>Kategori dikirim ke STM32 untuk menggerakkan pemilah, sekaligus dilaporkan ke backend (tersimpan &amp; muncul di dasbor).</p>
+    </div></div>
+    <div class="step"><div class="num">7</div><div>
+      <h4>Tunggu &amp; re-arm</h4>
+      <p>Kamera nonaktif sementara selama <code>ACTUATOR_SEC_&lt;kategori&gt; + REARM_BUFFER</code> (objek jatuh, pemilah balik). Lalu ambil baseline baru → siap objek berikutnya. Siklus berulang.</p>
+    </div></div>
+  </div>
+
+  <p class="note"><b>Fokus riset:</b> sistem sengaja mengirim data lewat LoRa dan HTTP secara paralel dengan penanda <code>seq</code> &amp; <code>sentAt</code> yang identik, agar dapat dibandingkan dari sisi keandalan (packet loss), latensi, dan throughput — di atas fungsi dasar IoT pemilah sampah otomatis.</p>
+
+  <footer>SmartBIN-BRIN — Diagram Arsitektur Sistem · bin-002 (ESP32) &amp; bin-003 (Raspberry Pi)</footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: "default", flowchart: { htmlLabels: true, curve: "basis" } });
+</script>
+</body>
+</html>
