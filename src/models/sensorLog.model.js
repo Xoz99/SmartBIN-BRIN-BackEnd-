@@ -51,16 +51,27 @@ export async function maxWeightPerDay(days = 7) {
  * @param {number} limit
  * @param {number} page
  */
-export async function findLogsByBinId(binId, limit = 50, page = 1) {
+export async function findLogsByBinId(binId, limit = 50, page = 1, { from, to, transport } = {}) {
     const skip = (page - 1) * limit;
+
+    // Filter opsional: rentang tanggal (createdAt) + transport (lora/http).
+    // Dipakai panel analitik agar riwayat sinyal ikut periode terpilih (bukan
+    // selalu "N terakhir") dan LoRa tidak terdorong keluar oleh HTTP yang rapat.
+    const where = { binId };
+    const createdAt = {};
+    if (from) { const d = new Date(from); if (!Number.isNaN(d.getTime())) createdAt.gte = d; }
+    if (to)   { const d = new Date(to);   if (!Number.isNaN(d.getTime())) createdAt.lte = d; }
+    if (createdAt.gte || createdAt.lte) where.createdAt = createdAt;
+    if (transport) where.transport = transport;
+
     const [items, total] = await Promise.all([
         prisma.sensorLog.findMany({
-            where: { binId },
+            where,
             orderBy: { createdAt: 'desc' },
             take: limit,
             skip,
         }),
-        prisma.sensorLog.count({ where: { binId } }),
+        prisma.sensorLog.count({ where }),
     ]);
     return { items, total };
 }

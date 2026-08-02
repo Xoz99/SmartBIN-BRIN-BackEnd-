@@ -123,8 +123,8 @@ export async function getBinById(id) {
  * @param {number} limit
  * @param {number} page
  */
-export async function getBinHistory(id, limit = 50, page = 1) {
-    return findLogsByBinId(id, limit, page);
+export async function getBinHistory(id, limit = 50, page = 1, opts = {}) {
+    return findLogsByBinId(id, limit, page, opts);
 }
 
 /**

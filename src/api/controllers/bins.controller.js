@@ -46,11 +46,17 @@ export async function getBin(req, res) {
 }
 
 /**
- * GET /bins/:id/history?limit=50&page=1
+ * GET /bins/:id/history?limit=50&page=1&from=ISO&to=ISO&transport=lora|http
+ * from/to: filter rentang tanggal (createdAt). transport: saring jalur (lora/http).
  */
 export async function getBinHistoryController(req, res) {
     const { id } = req.params;
-    const limit = parseInt(req.query.limit) || 50;
+    const { from, to, transport } = req.query;
+
+    // Kalau ada rentang tanggal, default limit dinaikkan (biar seluruh bacaan di
+    // periode itu keambil — LoRa tak terpotong window "N terakhir"). Tetap dibatasi.
+    const hasRange = Boolean(from || to);
+    const limit = Math.min(parseInt(req.query.limit) || (hasRange ? 1000 : 50), 5000);
     const page = parseInt(req.query.page) || 1;
 
     const bin = await findBinById(id);
@@ -61,7 +67,7 @@ export async function getBinHistoryController(req, res) {
         return error(res, 'Forbidden: bin is not in your area', 403);
     }
 
-    const { items, total } = await getBinHistory(id, limit, page);
+    const { items, total } = await getBinHistory(id, limit, page, { from, to, transport });
     return paginated(res, items, total, page, limit, 'History retrieved');
 }
 
