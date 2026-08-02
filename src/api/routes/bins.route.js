@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { listBins, getBin, getBinHistoryController, setThresholdController, createBinController, updateBinController, deleteBinController, getOptimalRouteController } from '../controllers/bins.controller.js';
+import { listBins, getBin, getBinHistoryController, setThresholdController, createBinController, updateBinController, deleteBinController, getOptimalRouteController, tareBinController, clearTareController } from '../controllers/bins.controller.js';
 import { authenticate, authorize } from '../middlewares/auth.middleware.js';
 import { validate } from '../middlewares/validate.js';
 
@@ -43,6 +43,10 @@ router.get('/:id', authenticate, getBin);
 
 // GET /bins/:id/history
 router.get('/:id/history', authenticate, getBinHistoryController);
+
+// POST /bins/:id/tare — set titik nol load cell (tong kosong). DELETE = reset.
+router.post('/:id/tare', authenticate, authorize('ADMIN', 'PETUGAS'), tareBinController);
+router.delete('/:id/tare', authenticate, authorize('ADMIN', 'PETUGAS'), clearTareController);
 
 // POST /bins — ADMIN only
 router.post('/', authenticate, authorize('ADMIN'), validate({ body: CreateBinSchema }), createBinController);

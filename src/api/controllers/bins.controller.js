@@ -1,6 +1,7 @@
 import { getAllBins, getBinById, getBinHistory, setThreshold, getOptimalRoute } from '../../services/bin.service.js';
 import { findBinById, createBin as createBinModel, updateBin as updateBinModel, deleteBin as deleteBinModel } from '../../models/bin.model.js';
 import { success, error, paginated } from '../../utils/response.js';
+import { captureTare, clearTare } from '../../config/weightMode.js';
 
 /**
  * GET /bins
@@ -69,6 +70,35 @@ export async function getBinHistoryController(req, res) {
 
     const { items, total } = await getBinHistory(id, limit, page, { from, to, transport });
     return paginated(res, items, total, page, limit, 'History retrieved');
+}
+
+/**
+ * POST /bins/:id/tare — jadikan bacaan berat terbaru sebagai titik nol (tong KOSONG).
+ * Semua berat berikutnya dikurangi offset ini (software tare, tanpa reflash firmware).
+ */
+export async function tareBinController(req, res) {
+    const { id } = req.params;
+    const bin = await findBinById(id);
+    if (!bin) return error(res, 'Bin not found', 404);
+
+    const r = await captureTare(id);
+    if (!r.ok) {
+        return error(res, r.reason === 'no-reading'
+            ? 'Belum ada bacaan berat terbaru — pastikan alat kirim data & tong kosong, lalu ulangi'
+            : 'Tare gagal (cache tidak aktif)', 400);
+    }
+    return success(res, { nodeId: bin.nodeId, offset: r.offset },
+        `Tare tersimpan — ${r.offset} kg dijadikan titik nol`, 200);
+}
+
+/**
+ * DELETE /bins/:id/tare — hapus offset tare (balik ke bacaan mentah).
+ */
+export async function clearTareController(req, res) {
+    const bin = await findBinById(req.params.id);
+    if (!bin) return error(res, 'Bin not found', 404);
+    await clearTare(req.params.id);
+    return success(res, { nodeId: bin.nodeId }, 'Tare direset (offset dihapus)', 200);
 }
 
 /**

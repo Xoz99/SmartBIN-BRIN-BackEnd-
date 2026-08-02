@@ -11,6 +11,7 @@ import {
     WEIGHT_MODE, getConfirmedWeight,
     getPendingLabel, clearPendingLabel, setConfirmedWeight,
     recordWeighing,
+    setRawWeight, getTareOffset,
 } from '../../config/weightMode.js';
 
 /**
@@ -100,6 +101,15 @@ export async function handleSensorData(nodeId, rawPayload) {
     if (!bin) {
         logger.warn(`[SensorHandler] Unknown nodeId: ${nodeId}. Data discarded.`);
         return;
+    }
+
+    // 2b. Software tare: simpan bacaan MENTAH (untuk kalibrasi tare via
+    // POST /bins/:id/tare), lalu kurangi berat dengan offset "kosong" tersimpan
+    // → load cell tak perlu di-tare di firmware, tong kosong ≈ 0.
+    if (data.weight != null) {
+        await setRawWeight(bin.id, data.weight);
+        const tareOffset = await getTareOffset(bin.id);
+        if (tareOffset) data.weight = Math.max(0, data.weight - tareOffset);
     }
 
     // 3. Auto-update bin GPS coordinates if provided

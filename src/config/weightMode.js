@@ -40,6 +40,37 @@ const pendingKey      = (binId) => `bin:${binId}:pendingWeight`;  // berat menun
 const pendingLabelKey = (binId) => `bin:${binId}:pendingLabel`;   // jenis sampah menunggu berat (sensor_pairing)
 const confirmedKey    = (binId) => `bin:${binId}:weight`;         // berat tong terkonfirmasi / total berjalan
 const weighPeakKey    = (binId) => `bin:${binId}:weighPeak`;      // berat puncak episode timbang berjalan (accumulate)
+const tareOffsetKey   = (binId) => `bin:${binId}:tareOffset`;     // titik nol load cell (software tare)
+const rawWeightKey    = (binId) => `bin:${binId}:rawWeight`;      // bacaan MENTAH terakhir (untuk capture tare)
+
+// ── Software tare (offset "kosong") ─────────────────────────────────────
+// Load cell tanpa tare kirim offset baseline (mis. tong kosong terbaca 141kg).
+// Simpan bacaan mentah terakhir; saat operator menekan Tare (tong kosong),
+// bacaan itu jadi titik nol. Semua berat berikutnya dikurangi offset ini →
+// tong kosong ≈ 0 tanpa perlu tare di firmware.
+export async function getTareOffset(binId) {
+    if (!redisClient) return 0;
+    const v = parseFloat(await redisClient.get(tareOffsetKey(binId)));
+    return Number.isNaN(v) ? 0 : v;
+}
+
+export async function setRawWeight(binId, kg) {
+    if (!redisClient || kg == null) return;
+    await redisClient.set(rawWeightKey(binId), String(kg), 'EX', 120);
+}
+
+export async function captureTare(binId) {
+    if (!redisClient) return { ok: false, reason: 'redis-off' };
+    const raw = parseFloat(await redisClient.get(rawWeightKey(binId)));
+    if (Number.isNaN(raw)) return { ok: false, reason: 'no-reading' };
+    await redisClient.set(tareOffsetKey(binId), String(raw));
+    return { ok: true, offset: raw };
+}
+
+export async function clearTare(binId) {
+    if (!redisClient) return;
+    await redisClient.del(tareOffsetKey(binId));
+}
 
 // ── Pending weight (sensor kirim, belum dikonfirmasi user) ──────────────
 export async function setPendingWeight(binId, weight) {
