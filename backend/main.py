@@ -257,6 +257,9 @@ def _serial_dispatcher_loop():
                 if COMPARE_HTTP and _http_q is not None:
                     body = {k: v for k, v in data.items() if not str(k).startswith("_")}
                     body["transport"] = "http"
+                    # packetLen = ukuran payload (byte) — sama dgn yang dikirim ke LoRa,
+                    # biar sebanding. Backend pakai ini + latency utk hitung throughput HTTP.
+                    body["packetLen"] = len(fwd.encode("utf-8"))
                     try:
                         _http_q.put_nowait(body)
                     except queue.Full:

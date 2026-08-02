@@ -160,6 +160,14 @@ export async function handleSensorData(nodeId, rawPayload) {
         }
     }
 
+    // Throughput jalur HTTP tidak diukur di device (LoRa dihitung dari airtime RF
+    // di gateway). Turunkan di sini dari ukuran paket & latency end-to-end
+    // (bit / detik) → sebanding untuk perbandingan LoRa vs HTTP.
+    let throughputBps = data.throughputBps ?? null;
+    if (throughputBps == null && data.transport === 'http' && data.packetLen && latencyMs > 0) {
+        throughputBps = (data.packetLen * 8) / (latencyMs / 1000);
+    }
+
     // 4. Save SensorLog to PostgreSQL
     // Kolom weight/volume/battery NOT NULL di DB → default 0 kalau sensornya belum ada.
     const log = await prisma.sensorLog.create({
@@ -178,7 +186,7 @@ export async function handleSensorData(nodeId, rawPayload) {
             seq:      data.seq ?? null,
             sentAt:   sentAtDate,
             latencyMs,
-            throughputBps: data.throughputBps ?? null,
+            throughputBps,
         },
     });
 
@@ -287,7 +295,7 @@ export async function handleSensorData(nodeId, rawPayload) {
         transport: data.transport ?? null,
         seq:      data.seq ?? null,
         latencyMs,
-        throughputBps: data.throughputBps ?? null,
+        throughputBps,
         timestamp: log.createdAt,
     });
 
