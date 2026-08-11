@@ -22,6 +22,7 @@ import analyticsRoutes from './routes/analytics.route.js';
 import classificationsRoutes from './routes/classifications.route.js';
 import ingestRoutes from './routes/ingest.route.js';
 import cameraRoutes from './routes/camera.route.js';
+import devicesRoutes from './routes/devices.route.js';
 
 export function createApp() {
     const app = express();
@@ -70,6 +71,7 @@ export function createApp() {
     app.use('/classifications', classificationsRoutes);
     app.use('/ingest', ingestRoutes);
     app.use('/camera', cameraRoutes);
+    app.use('/devices', devicesRoutes);
 
     // ─── 404 handler ─────────────────────────────────────────────────────────
     app.use((_req, res) => {

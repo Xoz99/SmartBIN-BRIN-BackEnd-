@@ -4,6 +4,7 @@ import { handleSensorData } from './handlers/sensorData.js';
 import { handleStatusData } from './handlers/statusData.js';
 import { handleImageData } from './handlers/imageData.js';
 import { handleClassificationData } from './handlers/classificationData.js';
+import { handleDeviceState, handleDeviceAckMsg, handleDeviceLog } from './handlers/deviceData.js';
 import { logger } from '../utils/logger.js';
 
 export async function startMqttSubscriber() {
@@ -60,6 +61,24 @@ export async function startMqttSubscriber() {
             case 'classification':
                 await handleClassificationData(nodeId, payload).catch((err) =>
                     logger.error(`[MQTT] classificationData handler error (${nodeId}):`, err.message)
+                );
+                break;
+
+            case 'device/state':
+                await handleDeviceState(nodeId, payload).catch((err) =>
+                    logger.error(`[MQTT] deviceState handler error (${nodeId}):`, err.message)
+                );
+                break;
+
+            case 'device/ack':
+                await handleDeviceAckMsg(nodeId, payload).catch((err) =>
+                    logger.error(`[MQTT] deviceAck handler error (${nodeId}):`, err.message)
+                );
+                break;
+
+            case 'device/log':
+                await handleDeviceLog(nodeId, payload).catch((err) =>
+                    logger.error(`[MQTT] deviceLog handler error (${nodeId}):`, err.message)
                 );
                 break;
 

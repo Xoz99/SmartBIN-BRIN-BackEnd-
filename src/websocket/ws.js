@@ -127,7 +127,7 @@ function sendToLocalClients(message) {
  * receives it via {@link setupRedisSubscriber} and fans it out to its clients.
  * Falls back to a direct in-process send when Redis is unavailable.
  *
- * @param {'BIN_UPDATE'|'ALERT_NEW'|'ALERT_RESOLVED'|'BIN_STATUS'|'CLASSIFICATION_NEW'|'PICKUP_COMPLETED'|'PICKUP_CONFIRMED'} event
+ * @param {'BIN_UPDATE'|'ALERT_NEW'|'ALERT_RESOLVED'|'BIN_STATUS'|'CLASSIFICATION_NEW'|'PICKUP_COMPLETED'|'PICKUP_CONFIRMED'|'DEVICE_STATE'|'DEVICE_ACK'|'DEVICE_LOG'} event
  * @param {object} payload
  */
 export async function broadcast(event, payload) {
