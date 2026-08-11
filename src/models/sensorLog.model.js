@@ -77,6 +77,32 @@ export async function findLogsByBinId(binId, limit = 50, page = 1, { from, to, t
 }
 
 /**
+ * Ambil SEMUA sensor log satu bin di rentang tanggal, urut waktu naik, untuk
+ * perhitungan metrik perbandingan LoRa vs HTTP (packet loss sadar-restart, jitter,
+ * dll). Beda dari findLogsByBinId: tidak dibatasi window "N terakhir" (cap tinggi
+ * biar seluruh periode keambil) & hanya kolom yang dipakai metrik.
+ * @param {string} binId
+ * @param {{ from?: string, to?: string }} opts
+ */
+export async function findLogsForCompare(binId, { from, to } = {}) {
+    const where = { binId };
+    const createdAt = {};
+    if (from) { const d = new Date(from); if (!Number.isNaN(d.getTime())) createdAt.gte = d; }
+    if (to)   { const d = new Date(to);   if (!Number.isNaN(d.getTime())) createdAt.lte = d; }
+    if (createdAt.gte || createdAt.lte) where.createdAt = createdAt;
+
+    return prisma.sensorLog.findMany({
+        where,
+        orderBy: { createdAt: 'asc' },
+        take: 100000,   // batas aman; 1 bin realistis jauh di bawah ini
+        select: {
+            transport: true, seq: true, latencyMs: true, throughputBps: true,
+            packetLen: true, rssi: true, snr: true, createdAt: true,
+        },
+    });
+}
+
+/**
  * Get the most recent sensor log for a bin
  * @param {string} binId
  */

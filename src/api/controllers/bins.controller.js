@@ -1,4 +1,4 @@
-import { getAllBins, getBinById, getBinHistory, setThreshold, getOptimalRoute } from '../../services/bin.service.js';
+import { getAllBins, getBinById, getBinHistory, setThreshold, getOptimalRoute, getTransportComparison } from '../../services/bin.service.js';
 import { findBinById, createBin as createBinModel, updateBin as updateBinModel, deleteBin as deleteBinModel } from '../../models/bin.model.js';
 import { success, error, paginated } from '../../utils/response.js';
 import { captureTare, clearTare } from '../../config/weightMode.js';
@@ -70,6 +70,27 @@ export async function getBinHistoryController(req, res) {
 
     const { items, total } = await getBinHistory(id, limit, page, { from, to, transport });
     return paginated(res, items, total, page, limit, 'History retrieved');
+}
+
+/**
+ * GET /bins/:id/transport-compare?from=ISO&to=ISO
+ * Metrik perbandingan LoRa vs HTTP dihitung di server (packet loss sadar-restart,
+ * jitter, jeda, throughput, latency) → panel "Perbandingan Komunikasi" tinggal render.
+ */
+export async function getTransportCompareController(req, res) {
+    const { id } = req.params;
+    const { from, to } = req.query;
+
+    const bin = await findBinById(id);
+    if (!bin) return error(res, 'Bin not found', 404);
+
+    // Area ownership check — sama seperti history: PETUGAS dibatasi ke area-nya.
+    if (req.user.role === 'PETUGAS' && req.user.areaId && bin.areaId && bin.areaId !== req.user.areaId) {
+        return error(res, 'Forbidden: bin is not in your area', 403);
+    }
+
+    const data = await getTransportComparison(id, { from, to });
+    return success(res, data, 'Transport comparison retrieved');
 }
 
 /**

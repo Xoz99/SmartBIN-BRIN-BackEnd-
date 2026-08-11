@@ -17,10 +17,8 @@ Env config: lihat .env.example (BACKEND_URL, DEVICE_INGEST_KEY, LORA_*).
 """
 
 import os
-import re
 import json
 import time
-import queue
 import signal
 import logging
 import threading
@@ -57,6 +55,7 @@ logging.basicConfig(
 log = logging.getLogger("gateway-http")
 
 # ─── Shared state ────────────────────────────────────────────────────────────
+
 running = True
 known_nodes: set[str] = set()
 known_nodes_lock = threading.Lock()
@@ -91,15 +90,6 @@ def lora_receiver() -> Iterator[str]:
         # karena payload dari STM32 belum tentu punya field node sendiri.
         import serial  # pyserial
 
-        # Board ngeprint metrik RF SEBELUM baris SENSOR:, contoh:
-        #   [RF IN] Len: 42 | RSSI: -60 | SNR: 9.5
-        #   SENSOR:bin-003:{...}
-        # Kita tangkap RSSI/SNR/Len ASLI dari [RF IN], lalu tempelkan ke payload
-        # SENSOR berikutnya (override rssi dummy dari node) — ini yang dipakai
-        # buat penelitian kualitas link LoRa.
-        rf_re = re.compile(r"Len:\s*(\d+).*?RSSI:\s*(-?\d+).*?SNR:\s*(-?[\d.]+)")
-        pending_rf = None
-
         ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=1)
         log.info(f"LoRa serial ready @ {SERIAL_PORT} {SERIAL_BAUD}bd")
         while running:
@@ -109,22 +99,8 @@ def lora_receiver() -> Iterator[str]:
                 log.error(f"serial error: {e} — reconnect 2s")
                 time.sleep(2)
                 continue
-            if not raw_line:
-                continue
-
-            # Baris metrik RF dari board → simpan buat ditempel ke SENSOR berikutnya
-            if raw_line.startswith("[RF IN]"):
-                m = rf_re.search(raw_line)
-                if m:
-                    pending_rf = {
-                        "packetLen": int(m.group(1)),
-                        "rssi": int(m.group(2)),
-                        "snr": float(m.group(3)),
-                    }
-                continue
-
-            if not raw_line.startswith("SENSOR:"):
-                continue  # log board lain, skip
+            if not raw_line or not raw_line.startswith("SENSOR:"):
+                continue  # log board biasa, skip
             # Split hanya 2x → bagian ke-3 tetap JSON utuh walau isinya ada ':'
             parts = raw_line.split(":", 2)
             if len(parts) < 3:
@@ -139,12 +115,6 @@ def lora_receiver() -> Iterator[str]:
             if not isinstance(d, dict):
                 continue
             d["nodeId"] = node  # header board menang atas field di JSON
-            # Tempel metrik RF ASLI (override rssi dummy dari node)
-            if pending_rf is not None:
-                d["rssi"] = pending_rf["rssi"]
-                d["snr"] = pending_rf["snr"]
-                d["packetLen"] = pending_rf["packetLen"]
-                pending_rf = None
             yield json.dumps(d)
         ser.close()
         return
@@ -208,20 +178,6 @@ def parse_packet(text: str) -> Tuple[Optional[str], Optional[dict]]:
         rssi = data.get("rssi", data.get("r"))
         if rssi is not None:
             payload["rssi"] = int(rssi)
-        # Metrik link LoRa (dari baris [RF IN] board) — buat penelitian
-        snr = data.get("snr")
-        if snr is not None:
-            payload["snr"] = float(snr)
-        plen = data.get("packetLen")
-        if plen is not None:
-            payload["packetLen"] = int(plen)
-        # Metadata perbandingan transport (dari device, lewat LoRa)
-        seq = data.get("seq")
-        if seq is not None:
-            payload["seq"] = int(seq)
-        sent_at = data.get("sentAt")
-        if sent_at is not None:
-            payload["sentAt"] = str(sent_at)
         return node, payload
     except (json.JSONDecodeError, ValueError, TypeError):
         pass
@@ -256,8 +212,7 @@ _session.headers.update({"Content-Type": "application/json"})
 
 def post_sensor(node: str, payload: dict) -> bool:
     """POST satu bacaan ke backend. Retry sederhana dgn backoff. True kalau sukses."""
-    # Tandai jalur = LoRa (dibandingkan dgn node yang POST HTTP langsung).
-    body = {"nodeId": node, "transport": "lora", **payload}
+    body = {"nodeId": node, **payload}
     for attempt in range(POST_RETRIES + 1):
         try:
             r = _session.post(INGEST_URL, json=body, timeout=POST_TIMEOUT)
@@ -278,35 +233,6 @@ def post_sensor(node: str, payload: dict) -> bool:
     return False
 
 
-# ─── Antrean + worker POST ───────────────────────────────────────────────────
-# Baca serial dan POST HTTP dipisah thread. Kalau digabung, POST yang lambat/gagal
-# (timeout + retry sleep) bikin serial berhenti dibaca → paket numpuk di buffer →
-# update datang beruntun (ngestack) + sebagian kebuang. Antrean menjaga serial
-# selalu terkuras cepat; worker yang menanggung latensi/retry POST.
-_post_q: "queue.Queue[Tuple[str, dict]]" = queue.Queue(maxsize=2000)
-
-
-def _poster_worker() -> None:
-    """Ambil bacaan dari antrean lalu POST ke backend. Jalan di thread sendiri."""
-    while running:
-        try:
-            node, payload = _post_q.get(timeout=1.0)
-        except queue.Empty:
-            continue
-        try:
-            ok = post_sensor(node, payload)
-            flag = "✓" if ok else "✗"
-            log.info(
-                f"{flag} {node} | w={payload.get('weight')}kg "
-                f"v={payload.get('volume')}% b={payload.get('battery')}% "
-                f"g={payload.get('gas', '-')}ppm "
-                f"rssi={payload.get('rssi', '-')}dBm snr={payload.get('snr', '-')}dB "
-                f"len={payload.get('packetLen', '-')}B | antre={_post_q.qsize()}"
-            )
-        finally:
-            _post_q.task_done()
-
-
 # ─── Main ────────────────────────────────────────────────────────────────────
 def main() -> None:
     global running
@@ -325,10 +251,6 @@ def main() -> None:
 
     log.info(f"gateway-http {GATEWAY_ID} → {INGEST_URL} (driver={LORA_DRIVER})")
 
-    # Worker POST di thread terpisah supaya loop baca serial tak pernah berhenti.
-    poster = threading.Thread(target=_poster_worker, daemon=True)
-    poster.start()
-
     for raw in lora_receiver():
         if not running:
             break
@@ -343,21 +265,13 @@ def main() -> None:
         if is_new:
             log.info(f"+ new bin discovered: {node}")
 
-        # Masukkan ke antrean (non-blocking). Kalau penuh (backend lama down),
-        # buang bacaan TERLAMA supaya data terbaru tetap masuk.
-        try:
-            _post_q.put_nowait((node, payload))
-        except queue.Full:
-            try:
-                _post_q.get_nowait()
-                _post_q.task_done()
-            except queue.Empty:
-                pass
-            try:
-                _post_q.put_nowait((node, payload))
-            except queue.Full:
-                pass
-            log.warning("antrean POST penuh — bacaan terlama dibuang")
+        ok = post_sensor(node, payload)
+        flag = "✓" if ok else "✗"
+        log.info(
+            f"{flag} {node} | w={payload.get('weight')}kg "
+            f"v={payload.get('volume')}% b={payload.get('battery')}% "
+            f"g={payload.get('gas', '-')}ppm rssi={payload.get('rssi', '-')}"
+        )
 
     log.info("gateway-http stopped cleanly")
 

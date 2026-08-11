@@ -1,0 +1,3 @@
+transport,n,periodeAwal,periodeAkhir,latencyAvgMs,latencyP50Ms,latencyP95Ms,throughputAvgKbps,throughputDihitung,packetLossPct,paketHilang,paketDiterima,restartTerdeteksi,rssiAvgDbm,snrAvgDb
+lora,1333,2026-07-25 05:14,2026-07-29 07:17,1408.18,1331,1449,4.75,tidak,4.92,69,1333,26,-62.74,9.67
+http,2853,2026-07-25 05:26,2026-08-05 07:37,70.33,42,135,31.32,tidak,0.38,11,2847,73,-999,

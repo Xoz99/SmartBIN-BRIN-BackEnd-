@@ -1,5 +1,5 @@
 import { findAllBins, findBinById, findBinByNodeId, updateBin } from '../models/bin.model.js';
-import { findLogsByBinId, findLatestByBinId } from '../models/sensorLog.model.js';
+import { findLogsByBinId, findLatestByBinId, findLogsForCompare } from '../models/sensorLog.model.js';
 import { redisClient } from '../config/redis.js';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
@@ -125,6 +125,86 @@ export async function getBinById(id) {
  */
 export async function getBinHistory(id, limit = 50, page = 1, opts = {}) {
     return findLogsByBinId(id, limit, page, opts);
+}
+
+// ── util statistik kecil ──
+const _mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+const _std = (xs) => {
+    if (xs.length < 2) return null;
+    const m = _mean(xs);
+    return Math.sqrt(xs.reduce((a, b) => a + (b - m) ** 2, 0) / (xs.length - 1));
+};
+
+/**
+ * Rangkum metrik satu transport dari baris yg SUDAH urut waktu naik.
+ * Packet loss & jeda dihitung SADAR-RESTART: tiap device restart, seq balik ke 1
+ * (gigi gergaji). Paket hilang hanya dihitung dalam segmen yg sama; lompatan mundur
+ * seq = restart (bukan loss). Jeda antar-paket hanya diambil dalam segmen (biar gap
+ * saat device mati tidak mengembungkan rata-rata).
+ */
+function summarizeTransport(rows) {
+    const lat = [], thr = [], rssiA = [], snrA = [], deltas = [];
+    let received = 0, gaps = 0, resets = 0;
+    let prevSeq = null, prevTime = null, firstTime = null, lastTime = null;
+
+    for (const r of rows) {
+        const t = r.createdAt.getTime();
+        if (r.latencyMs != null) lat.push(r.latencyMs);
+        if (r.throughputBps != null) thr.push(r.throughputBps);
+        if (r.rssi != null) rssiA.push(r.rssi);
+        if (r.snr != null) snrA.push(r.snr);
+        if (r.seq == null) continue;   // metrik berbasis seq butuh nomor urut
+
+        if (prevSeq != null) {
+            const d = r.seq - prevSeq;
+            if (d < 0) { resets++; }                 // seq turun → restart, mulai segmen baru
+            else if (d === 0) { continue; }          // duplikat → jangan hitung ganda
+            else {
+                if (d > 1) gaps += d - 1;            // (d-1) paket hilang dalam segmen
+                if (prevTime != null) deltas.push((t - prevTime) / 1000); // jeda intra-segmen (detik)
+            }
+        }
+        received++;
+        if (firstTime == null) firstTime = t;
+        lastTime = t;
+        prevSeq = r.seq;
+        prevTime = t;
+    }
+
+    const expected = received + gaps;
+    const jedaAvg = _mean(deltas);   // detik
+    const thrAvg = _mean(thr);
+    return {
+        paketDiterima: received,
+        paketHilang: gaps,
+        packetLossPct: expected ? (gaps / expected) * 100 : null,
+        restartTerdeteksi: resets,
+        latencyAvgMs: _mean(lat),
+        throughputAvgBps: thrAvg,
+        throughputAvgKbps: thrAvg != null ? thrAvg / 1000 : null,
+        jedaAvgSec: jedaAvg,
+        jitterSec: _std(deltas),
+        paketPerMenit: jedaAvg ? 60 / jedaAvg : null,
+        rssiAvgDbm: _mean(rssiA),
+        snrAvgDb: _mean(snrA),
+        periode: firstTime ? { from: new Date(firstTime), to: new Date(lastTime) } : null,
+    };
+}
+
+/**
+ * Metrik perbandingan LoRa vs HTTP untuk satu bin di rentang tanggal — dihitung di
+ * server (bukan di browser) supaya konsisten & sadar-restart. Dipakai panel
+ * "Perbandingan Komunikasi" di dashboard.
+ * @param {string} id - Bin primary key
+ * @param {{ from?: string, to?: string }} opts
+ */
+export async function getTransportComparison(id, opts = {}) {
+    const rows = await findLogsForCompare(id, opts);
+    return {
+        lora: summarizeTransport(rows.filter((r) => r.transport === 'lora')),
+        http: summarizeTransport(rows.filter((r) => r.transport === 'http')),
+        totalBaris: rows.length,
+    };
 }
 
 /**

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { listBins, getBin, getBinHistoryController, setThresholdController, createBinController, updateBinController, deleteBinController, getOptimalRouteController, tareBinController, clearTareController } from '../controllers/bins.controller.js';
+import { listBins, getBin, getBinHistoryController, getTransportCompareController, setThresholdController, createBinController, updateBinController, deleteBinController, getOptimalRouteController, tareBinController, clearTareController } from '../controllers/bins.controller.js';
 import { authenticate, authorize } from '../middlewares/auth.middleware.js';
 import { validate } from '../middlewares/validate.js';
 
@@ -43,6 +43,9 @@ router.get('/:id', authenticate, getBin);
 
 // GET /bins/:id/history
 router.get('/:id/history', authenticate, getBinHistoryController);
+
+// GET /bins/:id/transport-compare — metrik LoRa vs HTTP (dihitung di server)
+router.get('/:id/transport-compare', authenticate, getTransportCompareController);
 
 // POST /bins/:id/tare — set titik nol load cell (tong kosong). DELETE = reset.
 router.post('/:id/tare', authenticate, authorize('ADMIN', 'PETUGAS'), tareBinController);

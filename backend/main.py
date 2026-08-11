@@ -54,6 +54,21 @@ MODEL_PATH   = "model_advanced.tflite"
 FRONTEND_DIR = "../frontend"
 CLASS_NAMES  = ["Anorganik", "B3", "Organik"]
 
+# --- Ensemble klasifikasi ---
+# Model BARU jadi utama (lebih akurat anorganik/organik), model LAMA jadi "penjaga B3":
+# kalau model lama nge-vote B3 >= B3_GATE, hasil akhir dipaksa B3. Ini nutupin
+# kelemahan model baru yg sering meleset di B3. Aktif hanya kalau file model baru
+# ketemu; kalau tidak, jatuh ke model tunggal (perilaku lama) — jadi aman kalau
+# di Raspi file barunya belum dicopy.
+ENSEMBLE       = os.getenv("ENSEMBLE", "1") not in ("0", "false", "False", "")
+MODEL_PATH_NEW = os.getenv("MODEL_PATH_NEW", "model_ai_baru/model_fp16.tflite")
+B3_GATE        = float(os.getenv("B3_GATE", "0.55"))
+# Voting antar-frame: ambil beberapa frame lalu rata-ratain probabilitasnya biar
+# keputusan lebih stabil (mengurangi loncat organik<->anorganik, mis. daun kering).
+# VOTE_FRAMES=1 → matiin voting (perilaku lama, 1 frame).
+VOTE_FRAMES    = max(1, int(os.getenv("VOTE_FRAMES", "5")))
+VOTE_DELAY     = float(os.getenv("VOTE_DELAY", "0.03"))   # jeda antar-frame (detik)
+
 # --- SERIAL PORTS ---
 # AUTO-DETEKSI STM32 vs LoRa dari deskripsi/VID USB (biar tidak ketuker saat nomor
 # ttyACM* geser tiap reboot — penyebab "perintah aktuator nyasar ke LoRa").
@@ -428,23 +443,59 @@ def report_classification(kategori: str, confidence: float) -> bool:
 interpreter    = None
 input_details  = None
 output_details = None
+guard_interp   = None      # penjaga B3 (model lama) saat ensemble aktif
+guard_in       = None
+guard_out      = None
+ENSEMBLE_ACTIVE = False
 IN_H = IN_W   = 224
 INPUT_DTYPE   = np.float32
 _infer_lock    = threading.Lock()  # tflite tidak aman dipanggil paralel (kamera vs /predict/)
 
-print(f"[+] Loading model TFLite dari: {MODEL_PATH}")
+
+def _find_model(path):
+    """Cari file model: apa adanya, atau satu tingkat di atas (kalau dijalankan
+    dari backend/ tapi file ada di root repo). None kalau tak ketemu."""
+    if os.path.exists(path):
+        return path
+    alt = os.path.join("..", path)
+    return alt if os.path.exists(alt) else None
+
+
+def _load_tflite(path):
+    it = tflite.Interpreter(model_path=path)
+    it.allocate_tensors()
+    return it, it.get_input_details(), it.get_output_details()
+
+
+# Model utama: kalau ensemble aktif → model BARU; kalau file baru tak ada, jatuh ke
+# model lama (tunggal) biar deploy tetap jalan walau model baru belum dicopy.
+_primary_path = MODEL_PATH
+if ENSEMBLE:
+    _new = _find_model(MODEL_PATH_NEW)
+    if _new:
+        _primary_path = _new
+    else:
+        print(f"[!] ENSEMBLE aktif tapi model baru '{MODEL_PATH_NEW}' tak ditemukan → pakai model tunggal (lama).")
+
+print(f"[+] Loading model TFLite utama dari: {_primary_path}")
 try:
-    interpreter = tflite.Interpreter(model_path=MODEL_PATH)
-    interpreter.allocate_tensors()
-    input_details  = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
+    interpreter, input_details, output_details = _load_tflite(_primary_path)
     shape       = input_details[0]['shape']
     IN_H, IN_W  = int(shape[1]), int(shape[2])
     INPUT_DTYPE = input_details[0]['dtype']
-    print(f"[+] Model loaded! Input: {IN_W}x{IN_H}, dtype={INPUT_DTYPE.__name__}")
+    print(f"[+] Model utama loaded! Input: {IN_W}x{IN_H}, dtype={INPUT_DTYPE.__name__}")
 except Exception as e:
     interpreter = None
-    print(f"[!] Error loading model: {e}")
+    print(f"[!] Error loading model utama: {e}")
+
+# Penjaga B3 = model lama. Dimuat hanya kalau ensemble aktif & utama = model baru.
+if ENSEMBLE and interpreter is not None and _primary_path != MODEL_PATH:
+    try:
+        guard_interp, guard_in, guard_out = _load_tflite(MODEL_PATH)
+        ENSEMBLE_ACTIVE = True
+        print(f"[+] Penjaga B3 (model lama) loaded: {MODEL_PATH} | override B3 kalau prob B3 >= {B3_GATE*100:.0f}%")
+    except Exception as e:
+        print(f"[!] Gagal load penjaga B3 '{MODEL_PATH}': {e} → ensemble nonaktif, pakai model utama saja.")
 
 def _preprocess(image: Image.Image) -> np.ndarray:
     image = image.convert("RGB").resize((IN_W, IN_H))
@@ -463,19 +514,57 @@ def _preprocess(image: Image.Image) -> np.ndarray:
         arr = np.expand_dims(arr, axis=0).astype(INPUT_DTYPE)
     return arr
 
-def _predict(image: Image.Image):
-    inp = _preprocess(image)
+_B3_IDX = CLASS_NAMES.index("B3")
+
+
+def _run(interp, ins, outs, inp):
+    """Satu inferensi tflite → vektor probabilitas (sudah di-dequant kalau perlu)."""
     with _infer_lock:
-        interpreter.set_tensor(input_details[0]['index'], inp)
-        interpreter.invoke()
-        preds = interpreter.get_tensor(output_details[0]['index'])[0].copy()
-    if output_details[0]['dtype'] != np.float32:
-        scale, zero = output_details[0]['quantization']
+        interp.set_tensor(ins[0]['index'], inp)
+        interp.invoke()
+        preds = interp.get_tensor(outs[0]['index'])[0].copy()
+    if outs[0]['dtype'] != np.float32:
+        scale, zero = outs[0]['quantization']
         if scale:
             preds = (preds.astype(np.float32) - zero) * scale
-    preds = preds.astype(np.float32)
+    return preds.astype(np.float32)
+
+
+def _predict_vote(images):
+    """Voting antar-frame: rata-ratain vektor probabilitas beberapa frame → 1
+    keputusan. Lebih stabil daripada 1 frame (ngurangin loncat organik<->anorganik
+    di objek susah kayak daun kering). 1 gambar = sama persis dengan single-frame."""
+    imgs = images if isinstance(images, (list, tuple)) else [images]
+    imgs = [im for im in imgs if im is not None]
+    if not imgs:
+        return None, 0.0
+
+    acc = None            # jumlah probabilitas model utama
+    g_b3_acc = 0.0        # jumlah prob B3 dari penjaga (model lama)
+    n = 0
+    for image in imgs:
+        inp   = _preprocess(image)
+        preds = _run(interpreter, input_details, output_details, inp)
+        acc   = preds if acc is None else acc + preds
+        if ENSEMBLE_ACTIVE:
+            g_b3_acc += float(_run(guard_interp, guard_in, guard_out, inp)[_B3_IDX])
+        n += 1
+
+    preds = acc / n                       # rata-rata probabilitas
     idx   = int(np.argmax(preds))
-    return CLASS_NAMES[idx], float(preds[idx])
+    label, conf = CLASS_NAMES[idx], float(preds[idx])
+
+    # Ensemble: model lama sbg penjaga B3. Pakai rata-rata prob B3 juga biar konsisten.
+    if ENSEMBLE_ACTIVE:
+        g_b3 = g_b3_acc / n
+        if g_b3 >= B3_GATE:
+            return "B3", g_b3
+    return label, conf
+
+
+def _predict(image: Image.Image):
+    """Single-frame (dipakai endpoint HTTP /predict). Loop kamera pakai voting."""
+    return _predict_vote([image])
 
 # ========================================================
 # KAMERA REALTIME DI RASPI (motion-gate + auto klasifikasi)
@@ -661,10 +750,14 @@ class CameraWorker:
                     if still >= STILL_NEED:
                         detecting = False
                         shot = frame
-                        for _ in range(2):
+                        vote_shots = []             # kumpulan frame untuk voting
+                        for _ in range(VOTE_FRAMES):
                             ok2, f2 = self.cap.read()   # ambil frame segar
                             if ok2:
                                 shot = f2
+                            vote_shots.append(shot)
+                            if VOTE_DELAY > 0:
+                                time.sleep(VOTE_DELAY)
                         self.last_raw = shot
                         if SAVE_SHOT:
                             try:
@@ -685,7 +778,9 @@ class CameraWorker:
                         # untuk DETEKSI kapan ada objek di platform, bukan input model.
                         img = Image.fromarray(cv2.cvtColor(shot, cv2.COLOR_BGR2RGB))
                         try:
-                            kategori, conf = _predict(img)
+                            vote_imgs = [Image.fromarray(cv2.cvtColor(s, cv2.COLOR_BGR2RGB))
+                                         for s in vote_shots] or [img]
+                            kategori, conf = _predict_vote(vote_imgs)
                         except Exception as e:
                             print(f"[CAM] gagal klasifikasi: {e}")
                             kategori, conf = None, 0.0
