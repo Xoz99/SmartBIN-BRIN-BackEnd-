@@ -32,6 +32,8 @@ export const ALLOWED_ACTIONS = new Set([
     'actuator',
     'log_stream',
     'ping',
+    'shutdown',
+    'reboot',
 ]);
 
 /**
