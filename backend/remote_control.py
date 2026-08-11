@@ -27,6 +27,7 @@ Perilaku penting:
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -316,6 +317,13 @@ class RemoteControl:
             "reboot",
             lambda a: self._power("reboot", "reboot"),
         )
+        # Restart main.py tanpa restart OS. Socket MQTT ikut ditutup — kalau
+        # belum ada watchdog systemd yang restart otomatis, Pi jadi offline.
+        # Didesain buat dipakai bersama unit systemd (Restart=always) di Pi.
+        self._actions.setdefault(
+            "run",
+            lambda a: self._restart_main("run"),
+        )
 
         self._tee = _StdoutTee(sys.stdout, self._log_sink)
         sys.stdout = self._tee
@@ -330,6 +338,24 @@ class RemoteControl:
         import threading as _t
         _t.Thread(target=lambda: os.system(f"sudo {verb}"), daemon=True).start()
         return {"action": name, "scheduled": True}
+
+    def _restart_main(self, name):
+        """Jalankan ulang proses main.py.
+
+        Proses keluar keras (os._exit) ~1 detik setelah ack sempat ter-publish —
+        broker lalu mengirim LWT offline, dan unit systemd (Restart=always)
+        menyalakan ulang main.py. Tanpa systemd, Pi jadi offline sampai ada
+        yang SSH masuk.
+        """
+        import threading as _t
+
+        def _die():
+            time.sleep(1.0)          # sisakan waktu buat ack ke-publish dulu
+            print("[Remote] Restart main.py ...")
+            os._exit(0)              # keluar keras → socket tutup → LWT offline
+
+        _t.Thread(target=_die, daemon=True).start()
+        return {"action": name, "scheduled": True, "restart_via": "systemd"}
 
     def _log_pump(self):
         # Thread ini ikut nge-print saat error → bisukan supaya tidak rekursi.

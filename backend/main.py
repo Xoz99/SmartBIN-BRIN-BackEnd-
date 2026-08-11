@@ -20,6 +20,8 @@ import paho.mqtt.client as mqtt_client
 import serial
 import serial.tools.list_ports
 
+from remote_control import RemoteControl
+
 # Baca file .env (di folder yang sama) kalau ada → config per-node tanpa ubah kode
 # maupun ketik env panjang tiap run. Cukup `python3 main.py`. (pip install python-dotenv)
 try:
@@ -87,6 +89,10 @@ MQTT_PORT    = int(os.environ.get("MQTT_PORT", "8883"))
 MQTT_USER    = os.environ.get("MQTT_USER", "bintrash")
 MQTT_PASS    = os.environ.get("MQTT_PASS", "Smartbinbrin1")
 NODE_ID      = os.environ.get("NODE_ID", "bin-003")
+
+# Bridge remote-control lewat MQTT (topik smartbin/{NODE_ID}/device/*).
+# Bikin start/stop kamera + baca status + tail log bisa dari luar NAT tanpa VPN.
+remote = RemoteControl(NODE_ID)
 
 # --- Jalur forward yang aktif (bisa dimatiin per-jalur lewat env) ---
 # Default: MQTT + LoRa nyala (perilaku lama). Matikan salah satu saat eksperimen
@@ -345,6 +351,7 @@ def _on_connect(client, userdata, flags, rc, properties=None):
         client.subscribe(TOPIC_STATUS)  # sensor gak perlu di-subscribe balik, kita yg publish
         print(f"[MQTT] Connected!")
         client.publish(TOPIC_STATUS, json.dumps({"status": "online", "via": "fastapi"}), retain=True)
+        remote.on_connect(client)   # subscribe topik perintah + publish state awal
     else:
         mqtt_connected = False
         print(f"[MQTT] Gagal connect rc={rc}")
@@ -368,6 +375,12 @@ def init_mqtt():
     client.tls_set()
     client.on_connect    = _on_connect
     client.on_disconnect = _on_disconnect
+    client.on_message    = remote.on_message
+
+    # HARUS sebelum connect(): will_set hanya berlaku kalau didaftarkan
+    # sebelum handshake CONNECT. Ini yang bikin status retained tidak
+    # nyangkut "online" selamanya saat Pi mati mendadak.
+    remote.attach(client)
 
     try:
         client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
@@ -885,10 +898,61 @@ else:
 # FASTAPI LIFESPAN
 # ========================================================
 
+def _register_remote_actions():
+    """Sambungkan perintah MQTT ke fungsi yang SUDAH ada di file ini.
+
+    Tidak ada logika baru di sini — cuma memetakan action → fungsi lokal,
+    supaya perilaku lewat MQTT identik dengan lewat endpoint HTTP.
+    (`status` & `camera_worker` didefinisikan di bawah; nama global baru
+    di-resolve saat fungsi ini dipanggil, yaitu di startup.)
+    """
+
+    @remote.action("status")
+    def _act_status(args):
+        return status()
+
+    @remote.action("camera_start")
+    def _act_camera_start(args):
+        ok = camera_worker.start()
+        return {"started": ok, "running": camera_worker.running, "error": camera_worker.error}
+
+    @remote.action("camera_stop")
+    def _act_camera_stop(args):
+        camera_worker.stop()
+        return {"running": camera_worker.running}
+
+    @remote.action("actuator")
+    def _act_actuator(args):
+        cmd = str(args.get("cmd", "")).strip()
+        if cmd not in {"organik", "anorganik", "B3", "reset"}:
+            raise ValueError(f"Perintah tidak valid: {cmd!r}")
+        if cmd == "reset":
+            return {"ok": publish_cmd(cmd), "channel": "mqtt", "cmd": cmd}
+        return kirim_ke_stm32(cmd)
+
+    def _snapshot():
+        with sensor_lock:
+            sensor_ok = bool(latest_sensor)
+        return {
+            "camera":       "running" if camera_worker.running else "stopped",
+            "camera_error": camera_worker.error,
+            "last_detection": camera_worker.last,
+            "serial_stm32": "connected" if (arduino and arduino.is_open) else "disconnected",
+            "serial_lora":  "connected" if (lora_tx and lora_tx.is_open) else "disconnected",
+            "sensor_data":  "ada" if sensor_ok else "belum ada",
+            "last_seq":     _seq_counter,
+        }
+
+    remote.set_state_fn(_snapshot)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _is_running
     _is_running = True
+
+    _register_remote_actions()
+    remote.start()      # tee stdout + thread state/log — sebelum init_mqtt biar log startup ketangkep
 
     init_all_serial()   # <-- SATU-SATUNYA tempat buka serial STM32 & LoRa
     init_mqtt()
@@ -909,6 +973,7 @@ async def lifespan(app: FastAPI):
     yield
 
     _is_running = False
+    remote.stop()       # tandai offline dgn sopan + kembalikan sys.stdout
     camera_worker.stop()
     if _dispatcher_thread is not None:
         _dispatcher_thread.join(timeout=2)

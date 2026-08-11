@@ -1,0 +1,22 @@
+[Unit]
+Description=SmartBIN main.py (MQTT + kamera + remote control Pi)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=brin
+Group=brin
+WorkingDirectory=/home/brin/backend
+ExecStart=/usr/bin/python3 -u main.py
+# Selalu restart — ini yang bikin tombol "Nyalakan Smartbin" (action "run")
+# beneran menghidupkan ulang main.py: remote_control keluar (os._exit), systemd
+# langsung menyalakan proses baru, kamera auto-start (AUTO_START_CAM=1).
+Restart=always
+RestartSec=3
+Environment=NODE_ID=bin-003
+Environment=REMOTE_CONTROL=1
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

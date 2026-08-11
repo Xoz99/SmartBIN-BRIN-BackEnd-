@@ -34,6 +34,7 @@ export const ALLOWED_ACTIONS = new Set([
     'ping',
     'shutdown',
     'reboot',
+    'run',
 ]);
 
 /**
