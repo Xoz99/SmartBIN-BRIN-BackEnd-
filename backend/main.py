@@ -52,18 +52,20 @@ else:
 # ========================================================
 # CONFIG
 # ========================================================
-MODEL_PATH   = "model_advanced.tflite"
+MODEL_PATH   = "model_combo.tflite"
 FRONTEND_DIR = "../frontend"
 CLASS_NAMES  = ["Anorganik", "B3", "Organik"]
 
 # --- Ensemble klasifikasi ---
-# Model BARU jadi utama (lebih akurat anorganik/organik), model LAMA jadi "penjaga B3":
-# kalau model lama nge-vote B3 >= B3_GATE, hasil akhir dipaksa B3. Ini nutupin
-# kelemahan model baru yg sering meleset di B3. Aktif hanya kalau file model baru
-# ketemu; kalau tidak, jatuh ke model tunggal (perilaku lama) — jadi aman kalau
-# di Raspi file barunya belum dicopy.
+# Model BARU (primary) jadi utama (lebih akurat anorganik/organik: model_ai_baru/an_or32.tflite),
+# model LAMA (guard) jadi "penjaga B3" (model_combo.tflite): kalau guard nge-vote
+# B3 >= B3_GATE, hasil akhir dipaksa B3. Ini nutupin kelemahan primary yg sering
+# meleset di B3. Kombinasi ini sudah divalidasi manual lewat sim_platform.py
+# (--ensemble --ens-primary rpp32 --ens-guard baru3) sebelum dipindah ke sini.
+# Aktif hanya kalau file model baru ketemu; kalau tidak, jatuh ke model tunggal
+# (perilaku lama) — jadi aman kalau di Raspi file barunya belum dicopy.
 ENSEMBLE       = os.getenv("ENSEMBLE", "1") not in ("0", "false", "False", "")
-MODEL_PATH_NEW = os.getenv("MODEL_PATH_NEW", "model_ai_baru/model_fp16.tflite")
+MODEL_PATH_NEW = os.getenv("MODEL_PATH_NEW", "model_ai_baru/an_or32.tflite")
 B3_GATE        = float(os.getenv("B3_GATE", "0.55"))
 # Voting antar-frame: ambil beberapa frame lalu rata-ratain probabilitasnya biar
 # keputusan lebih stabil (mengurangi loncat organik<->anorganik, mis. daun kering).

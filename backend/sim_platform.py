@@ -11,7 +11,8 @@ Jalankan:
   python sim_platform.py --model lama     # model lama (model_advanced.tflite)
   python sim_platform.py --model baru32   # model baru presisi fp32
   python sim_platform.py --compare        # jalanin lama + baru bareng, adu prediksi tiap deteksi
-  python sim_platform.py --ensemble       # ensemble: primary=model_fp16_v5_daunasli.tflite (baru21) + guard B3=model_advanced.tflite (lama)
+  python sim_platform.py --ensemble       # ensemble: primary & guard default (lihat ENSEMBLE_PRIMARY_KEY/ENSEMBLE_GUARD_KEY)
+  python sim_platform.py --ensemble --ens-primary rpp32 --ens-guard baru3   # override kombinasi ensemble lewat CLI
 Preprocessing & urutan kelas SAMA dgn main.py (EfficientNet pass-through).
 """
 import argparse
@@ -31,12 +32,12 @@ MODELS = {
     "baru2":   os.path.join(ROOT, "backend", "model_fp16.tflite"),
     "baru3":   os.path.join(ROOT, "backend", "model_combo.tflite"),
     "baru32": os.path.join(ROOT, "model_ai_baru", "model_fp32.tflite"),
-    "rpp32": os.path.join(ROOT, "backend", "an_or32.tflite"),
+    "rpp32": os.path.join(ROOT, "model_ai_baru", "an_or32.tflite"),
     "rpp16": os.path.join(ROOT, "backend", "rapip16.tflite"),
 }
 
-# Model dipakai sbg PRIMARY saat --ensemble aktif (ganti dari "model_fp16.tflite" ke
-# "model_fp16_v5_daunasli.tflite" sesuai permintaan). Guard B3 tetap "lama" (model_advanced.tflite).
+# Default kombinasi ensemble kalau --ens-primary / --ens-guard tidak dikasih.
+# Bisa di-override lewat CLI tanpa ubah kode, buat A/B test kombinasi lain.
 ENSEMBLE_PRIMARY_KEY = "rpp32"
 ENSEMBLE_GUARD_KEY    = "baru3"
 
@@ -122,8 +123,8 @@ def classify_vote(interp, inp, out, rois):
 LIVE_EVERY = 1.2      # jeda antar klasifikasi di mode --live (detik)
 # B3_GATE dinaikkan dari 0.55 → 0.70: threshold lama kelewat gampang kelewatin,
 # daun kering sering bikin model lama ngasih prob B3 56-66% (false positive).
-B3_GATE_DEFAULT = 0.70   # prob B3 model lama >= ini → kandidat override B3
-# Margin tambahan: prob B3 model lama harus menang telak dari kelas kedua-tertingginya
+B3_GATE_DEFAULT = 0.70   # prob B3 model guard >= ini → kandidat override B3
+# Margin tambahan: prob B3 model guard harus menang telak dari kelas kedua-tertingginya
 # (bukan cuma lewat gate tipis-tipis), biar B3 "ragu-ragu" tidak maksa override.
 B3_MARGIN_DEFAULT = 0.15
 VOTE_FRAMES_DEFAULT = 5   # jumlah frame yg dirata-ratain (1 = matiin voting)
@@ -131,7 +132,7 @@ VOTE_DELAY_DEFAULT  = 0.03
 
 
 def _b3_should_override(o_p, gate, margin):
-    """True kalau prob B3 model lama (a) >= gate DAN (b) menang dari kelas
+    """True kalau prob B3 model guard (a) >= gate DAN (b) menang dari kelas
     kedua-tertinggi minimal `margin`. Dua syarat ini nyaring B3 'ragu-ragu'
     yang selama ini nyasar (mis. daun kering ke-vote B3 56-66%)."""
     b3_i = CLASS.index("B3")
@@ -142,26 +143,26 @@ def _b3_should_override(o_p, gate, margin):
 
 
 def ensemble_predict(new_t, old_t, frame, gate, margin=B3_MARGIN_DEFAULT):
-    """Gabung dua model: model BARU jadi utama (unggul anorganik/organik),
-    model LAMA jadi penjaga B3. Override ke B3 HANYA kalau prob B3 model lama
+    """Gabung dua model: model PRIMARY jadi utama (unggul anorganik/organik),
+    model GUARD jadi penjaga B3. Override ke B3 HANYA kalau prob B3 guard
     >= gate DAN menang telak (margin) dari kelas kedua-tertingginya; selain itu
-    ikut model baru. Return (label, conf, probs, alasan)."""
+    ikut model primary. Return (label, conf, probs, alasan)."""
     n_lbl, n_conf, n_p = classify(new_t[0], new_t[1], new_t[2], frame)
     o_lbl, o_conf, o_p = classify(old_t[0], old_t[1], old_t[2], frame)
     override, o_b3, second_max = _b3_should_override(o_p, gate, margin)
     if override:
-        info = (f"gerbang B3 → lama B3={o_b3*100:.0f}% (>= gate {gate*100:.0f}%, "
+        info = (f"gerbang B3 → guard B3={o_b3*100:.0f}% (>= gate {gate*100:.0f}%, "
                  f"margin {(o_b3 - second_max)*100:.0f}% >= {margin*100:.0f}%) "
-                 f"(baru bilang {n_lbl} {n_conf*100:.0f}%)")
+                 f"(primary bilang {n_lbl} {n_conf*100:.0f}%)")
         return "B3", o_b3, o_p, info
-    info = (f"ikut baru → {n_lbl} {n_conf*100:.0f}% "
-            f"(lama B3={o_b3*100:.0f}%, gate {gate*100:.0f}%, margin {(o_b3-second_max)*100:.0f}%<{margin*100:.0f}%)")
+    info = (f"ikut primary → {n_lbl} {n_conf*100:.0f}% "
+            f"(guard B3={o_b3*100:.0f}%, gate {gate*100:.0f}%, margin {(o_b3-second_max)*100:.0f}%<{margin*100:.0f}%)")
     return n_lbl, n_conf, n_p, info
 
 
 def ensemble_vote(new_t, old_t, rois, gate, margin=B3_MARGIN_DEFAULT):
-    """Ensemble + voting: rata-ratain probabilitas model baru & probabilitas
-    PENUH model lama (bukan cuma B3) dari beberapa frame, baru terapkan
+    """Ensemble + voting: rata-ratain probabilitas model primary & probabilitas
+    PENUH model guard (bukan cuma B3) dari beberapa frame, baru terapkan
     gerbang B3 (gate + margin) atas rata-rata itu."""
     n_lbl, n_conf, n_p = classify_vote(new_t[0], new_t[1], new_t[2], rois)
     old_acc = None
@@ -171,12 +172,12 @@ def ensemble_vote(new_t, old_t, rois, gate, margin=B3_MARGIN_DEFAULT):
     o_p = old_acc / len(rois)
     override, o_b3, second_max = _b3_should_override(o_p, gate, margin)
     if override:
-        info = (f"gerbang B3 → lama B3={o_b3*100:.0f}% (>= gate {gate*100:.0f}%, "
+        info = (f"gerbang B3 → guard B3={o_b3*100:.0f}% (>= gate {gate*100:.0f}%, "
                  f"margin {(o_b3 - second_max)*100:.0f}% >= {margin*100:.0f}%) "
-                 f"(baru bilang {n_lbl} {n_conf*100:.0f}%)")
+                 f"(primary bilang {n_lbl} {n_conf*100:.0f}%)")
         return "B3", o_b3, n_p, info
-    info = (f"ikut baru → {n_lbl} {n_conf*100:.0f}% "
-            f"(lama B3={o_b3*100:.0f}%, gate {gate*100:.0f}%, margin {(o_b3-second_max)*100:.0f}%<{margin*100:.0f}%)")
+    info = (f"ikut primary → {n_lbl} {n_conf*100:.0f}% "
+            f"(guard B3={o_b3*100:.0f}%, gate {gate*100:.0f}%, margin {(o_b3-second_max)*100:.0f}%<{margin*100:.0f}%)")
     return n_lbl, n_conf, n_p, info
 
 
@@ -226,7 +227,7 @@ def live_loop(it, inp, out, model_path, cmp_it, cmp_inp, cmp_out, cmp_name,
             c = COLOR.get(lbl, (200, 200, 200))
             cv2.putText(frame, f"{lbl} {cf*100:.0f}%", (x0, max(28, y0 - 12)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, c, 2)
-        tag = (f"LIVE ENSEMBLE  baru + lama(B3>={gate*100:.0f}%)" if ensemble
+        tag = (f"LIVE ENSEMBLE  primary + guard(B3>={gate*100:.0f}%)" if ensemble
                else f"LIVE  model: {os.path.basename(model_path)}")
         cv2.putText(frame, tag,
                     (10, frame.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 255), 1)
@@ -250,22 +251,26 @@ def main():
     ap.add_argument("--live", action="store_true",
                     help="mode tes model: klasifikasi terus-menerus tanpa nunggu aktuator")
     ap.add_argument("--ensemble", action="store_true",
-                    help=f"gabung: primary={ENSEMBLE_PRIMARY_KEY} (model_fp16_v5_daunasli.tflite) "
-                         f"+ guard B3={ENSEMBLE_GUARD_KEY} (model_advanced.tflite)")
+                    help="gabung 2 model: primary (anor/organik) + guard B3 (override B3). "
+                         "Kombinasi diatur lewat --ens-primary/--ens-guard.")
+    ap.add_argument("--ens-primary", default=ENSEMBLE_PRIMARY_KEY, dest="ens_primary",
+                    help=f"key/path model PRIMARY saat --ensemble (default {ENSEMBLE_PRIMARY_KEY})")
+    ap.add_argument("--ens-guard", default=ENSEMBLE_GUARD_KEY, dest="ens_guard",
+                    help=f"key/path model GUARD B3 saat --ensemble (default {ENSEMBLE_GUARD_KEY})")
     ap.add_argument("--b3-gate", type=float, default=B3_GATE_DEFAULT, dest="b3_gate",
-                    help=f"ambang prob B3 model lama utk override ke B3 (default {B3_GATE_DEFAULT})")
+                    help=f"ambang prob B3 model guard utk override ke B3 (default {B3_GATE_DEFAULT})")
     ap.add_argument("--b3-margin", type=float, default=B3_MARGIN_DEFAULT, dest="b3_margin",
-                    help=f"margin minimum prob B3 vs kelas kedua-tertinggi model lama (default {B3_MARGIN_DEFAULT})")
+                    help=f"margin minimum prob B3 vs kelas kedua-tertinggi model guard (default {B3_MARGIN_DEFAULT})")
     ap.add_argument("--vote", type=int, default=VOTE_FRAMES_DEFAULT,
                     help=f"jumlah frame dirata-ratain per keputusan, 1=matiin (default {VOTE_FRAMES_DEFAULT})")
     ap.add_argument("--vote-delay", type=float, default=VOTE_DELAY_DEFAULT, dest="vote_delay",
                     help=f"jeda antar-frame voting, detik (default {VOTE_DELAY_DEFAULT})")
     args = ap.parse_args()
 
-    # Ensemble: PRIMARY = model_fp16_v5_daunasli.tflite ("baru21"), bukan model_fp16.tflite lagi.
-    # Guard B3 tetap model lama ("lama" = model_advanced.tflite).
+    # Ensemble: primary/guard sekarang bisa dituker lewat CLI (--ens-primary/--ens-guard)
+    # tanpa ubah kode, buat A/B test kombinasi model dengan cepat.
     if args.ensemble:
-        args.model = ENSEMBLE_PRIMARY_KEY
+        args.model = args.ens_primary
 
     model_path = resolve_model(args.model)
     it, inp, out = load_interp(model_path)
@@ -275,7 +280,7 @@ def main():
     cmp_it = cmp_inp = cmp_out = cmp_name = None
     if args.compare or args.ensemble:
         if args.ensemble:
-            other = ENSEMBLE_GUARD_KEY
+            other = args.ens_guard
         else:
             other = "lama" if args.model != "lama" else "baru"
         cmp_path = resolve_model(other)
@@ -284,7 +289,7 @@ def main():
         role = "penjaga B3" if args.ensemble else "pembanding"
         print(f"[MODEL] {role}: {cmp_name}")
     if args.ensemble:
-        print(f"[ENSEMBLE] primary={ENSEMBLE_PRIMARY_KEY}, guard B3={ENSEMBLE_GUARD_KEY} "
+        print(f"[ENSEMBLE] primary={args.ens_primary}, guard B3={args.ens_guard} "
               f"(override B3 kalau prob B3 guard >= gate {args.b3_gate*100:.0f}% "
               f"DAN menang >= margin {args.b3_margin*100:.0f}% dari kelas kedua-tertinggi)")
 
