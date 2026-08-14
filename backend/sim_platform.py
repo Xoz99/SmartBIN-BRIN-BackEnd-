@@ -11,6 +11,7 @@ Jalankan:
   python sim_platform.py --model lama     # model lama (model_advanced.tflite)
   python sim_platform.py --model baru32   # model baru presisi fp32
   python sim_platform.py --compare        # jalanin lama + baru bareng, adu prediksi tiap deteksi
+  python sim_platform.py --ensemble       # ensemble: primary=model_fp16_v5_daunasli.tflite (baru21) + guard B3=model_advanced.tflite (lama)
 Preprocessing & urutan kelas SAMA dgn main.py (EfficientNet pass-through).
 """
 import argparse
@@ -23,9 +24,21 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS = {
     "lama":   os.path.join(ROOT, "model_advanced.tflite"),
-    "baru":   os.path.join(ROOT, "model_ai_baru", "model_fp16.tflite"),
+    "lama2":  os.path.join(ROOT, "model_ai_baru", "model_fp16.tflite"),
+    "baru":   os.path.join(ROOT, "backend", "model_fp16(3).tflite"),
+    "baru21":   os.path.join(ROOT, "backend", "model_fp16_v5_daunasli.tflite"),
+    "baru1":   os.path.join(ROOT, "backend", "model_fp16(2).tflite"),
+    "baru2":   os.path.join(ROOT, "backend", "model_fp16.tflite"),
+    "baru3":   os.path.join(ROOT, "backend", "model_combo.tflite"),
     "baru32": os.path.join(ROOT, "model_ai_baru", "model_fp32.tflite"),
+    "rpp32": os.path.join(ROOT, "backend", "an_or32.tflite"),
+    "rpp16": os.path.join(ROOT, "backend", "rapip16.tflite"),
 }
+
+# Model dipakai sbg PRIMARY saat --ensemble aktif (ganti dari "model_fp16.tflite" ke
+# "model_fp16_v5_daunasli.tflite" sesuai permintaan). Guard B3 tetap "lama" (model_advanced.tflite).
+ENSEMBLE_PRIMARY_KEY = "rpp32"
+ENSEMBLE_GUARD_KEY    = "baru3"
 
 
 def resolve_model(name):
@@ -107,40 +120,68 @@ def classify_vote(interp, inp, out, rois):
 
 
 LIVE_EVERY = 1.2      # jeda antar klasifikasi di mode --live (detik)
-B3_GATE_DEFAULT = 0.55  # prob B3 model lama >= ini → hasil dipaksa B3
+# B3_GATE dinaikkan dari 0.55 → 0.70: threshold lama kelewat gampang kelewatin,
+# daun kering sering bikin model lama ngasih prob B3 56-66% (false positive).
+B3_GATE_DEFAULT = 0.70   # prob B3 model lama >= ini → kandidat override B3
+# Margin tambahan: prob B3 model lama harus menang telak dari kelas kedua-tertingginya
+# (bukan cuma lewat gate tipis-tipis), biar B3 "ragu-ragu" tidak maksa override.
+B3_MARGIN_DEFAULT = 0.15
 VOTE_FRAMES_DEFAULT = 5   # jumlah frame yg dirata-ratain (1 = matiin voting)
 VOTE_DELAY_DEFAULT  = 0.03
 
 
-def ensemble_predict(new_t, old_t, frame, gate):
+def _b3_should_override(o_p, gate, margin):
+    """True kalau prob B3 model lama (a) >= gate DAN (b) menang dari kelas
+    kedua-tertinggi minimal `margin`. Dua syarat ini nyaring B3 'ragu-ragu'
+    yang selama ini nyasar (mis. daun kering ke-vote B3 56-66%)."""
+    b3_i = CLASS.index("B3")
+    o_b3 = float(o_p[b3_i])
+    others = [float(v) for i, v in enumerate(o_p) if i != b3_i]
+    second_max = max(others) if others else 0.0
+    return (o_b3 >= gate) and (o_b3 - second_max >= margin), o_b3, second_max
+
+
+def ensemble_predict(new_t, old_t, frame, gate, margin=B3_MARGIN_DEFAULT):
     """Gabung dua model: model BARU jadi utama (unggul anorganik/organik),
-    model LAMA jadi penjaga B3. Kalau model lama nge-vote B3 >= gate, hasil = B3;
-    selain itu ikut model baru. Return (label, conf, probs, alasan)."""
+    model LAMA jadi penjaga B3. Override ke B3 HANYA kalau prob B3 model lama
+    >= gate DAN menang telak (margin) dari kelas kedua-tertingginya; selain itu
+    ikut model baru. Return (label, conf, probs, alasan)."""
     n_lbl, n_conf, n_p = classify(new_t[0], new_t[1], new_t[2], frame)
     o_lbl, o_conf, o_p = classify(old_t[0], old_t[1], old_t[2], frame)
-    o_b3 = float(o_p[CLASS.index("B3")])
-    if o_b3 >= gate:
-        info = f"gerbang B3 → lama B3={o_b3*100:.0f}% >= {gate*100:.0f}% (baru bilang {n_lbl} {n_conf*100:.0f}%)"
+    override, o_b3, second_max = _b3_should_override(o_p, gate, margin)
+    if override:
+        info = (f"gerbang B3 → lama B3={o_b3*100:.0f}% (>= gate {gate*100:.0f}%, "
+                 f"margin {(o_b3 - second_max)*100:.0f}% >= {margin*100:.0f}%) "
+                 f"(baru bilang {n_lbl} {n_conf*100:.0f}%)")
         return "B3", o_b3, o_p, info
-    info = f"ikut baru → {n_lbl} {n_conf*100:.0f}% (lama B3={o_b3*100:.0f}% < {gate*100:.0f}%)"
+    info = (f"ikut baru → {n_lbl} {n_conf*100:.0f}% "
+            f"(lama B3={o_b3*100:.0f}%, gate {gate*100:.0f}%, margin {(o_b3-second_max)*100:.0f}%<{margin*100:.0f}%)")
     return n_lbl, n_conf, n_p, info
 
 
-def ensemble_vote(new_t, old_t, rois, gate):
-    """Ensemble + voting: rata-ratain probabilitas model baru & prob B3 model lama
-    dari beberapa frame, baru terapkan gerbang B3."""
+def ensemble_vote(new_t, old_t, rois, gate, margin=B3_MARGIN_DEFAULT):
+    """Ensemble + voting: rata-ratain probabilitas model baru & probabilitas
+    PENUH model lama (bukan cuma B3) dari beberapa frame, baru terapkan
+    gerbang B3 (gate + margin) atas rata-rata itu."""
     n_lbl, n_conf, n_p = classify_vote(new_t[0], new_t[1], new_t[2], rois)
-    b3_i = CLASS.index("B3")
-    o_b3 = float(np.mean([classify(old_t[0], old_t[1], old_t[2], r)[2][b3_i] for r in rois]))
-    if o_b3 >= gate:
-        info = f"gerbang B3 → lama B3={o_b3*100:.0f}% >= {gate*100:.0f}% (baru bilang {n_lbl} {n_conf*100:.0f}%)"
+    old_acc = None
+    for r in rois:
+        _, _, p = classify(old_t[0], old_t[1], old_t[2], r)
+        old_acc = p if old_acc is None else old_acc + p
+    o_p = old_acc / len(rois)
+    override, o_b3, second_max = _b3_should_override(o_p, gate, margin)
+    if override:
+        info = (f"gerbang B3 → lama B3={o_b3*100:.0f}% (>= gate {gate*100:.0f}%, "
+                 f"margin {(o_b3 - second_max)*100:.0f}% >= {margin*100:.0f}%) "
+                 f"(baru bilang {n_lbl} {n_conf*100:.0f}%)")
         return "B3", o_b3, n_p, info
-    info = f"ikut baru → {n_lbl} {n_conf*100:.0f}% (lama B3={o_b3*100:.0f}% < {gate*100:.0f}%)"
+    info = (f"ikut baru → {n_lbl} {n_conf*100:.0f}% "
+            f"(lama B3={o_b3*100:.0f}%, gate {gate*100:.0f}%, margin {(o_b3-second_max)*100:.0f}%<{margin*100:.0f}%)")
     return n_lbl, n_conf, n_p, info
 
 
 def live_loop(it, inp, out, model_path, cmp_it, cmp_inp, cmp_out, cmp_name,
-              ensemble=False, gate=B3_GATE_DEFAULT,
+              ensemble=False, gate=B3_GATE_DEFAULT, margin=B3_MARGIN_DEFAULT,
               vote=VOTE_FRAMES_DEFAULT, vote_delay=VOTE_DELAY_DEFAULT):
     """Mode tes model: arahin objek ke kotak, prediksi jalan terus tanpa aktuator."""
     cap = cv2.VideoCapture(0)
@@ -165,7 +206,7 @@ def live_loop(it, inp, out, model_path, cmp_it, cmp_inp, cmp_out, cmp_name,
                 rois = [roi]
             if ensemble:
                 label, conf, probs, info = ensemble_vote(
-                    (it, inp, out), (cmp_it, cmp_inp, cmp_out), rois, gate)
+                    (it, inp, out), (cmp_it, cmp_inp, cmp_out), rois, gate, margin)
                 last = (label, conf, probs)
                 print(f"[ENS ] {label:10s} ({conf*100:3.0f}%)   {info}")
             else:
@@ -209,18 +250,22 @@ def main():
     ap.add_argument("--live", action="store_true",
                     help="mode tes model: klasifikasi terus-menerus tanpa nunggu aktuator")
     ap.add_argument("--ensemble", action="store_true",
-                    help="gabung: model baru utama (anor/organik) + model lama penjaga B3")
+                    help=f"gabung: primary={ENSEMBLE_PRIMARY_KEY} (model_fp16_v5_daunasli.tflite) "
+                         f"+ guard B3={ENSEMBLE_GUARD_KEY} (model_advanced.tflite)")
     ap.add_argument("--b3-gate", type=float, default=B3_GATE_DEFAULT, dest="b3_gate",
                     help=f"ambang prob B3 model lama utk override ke B3 (default {B3_GATE_DEFAULT})")
+    ap.add_argument("--b3-margin", type=float, default=B3_MARGIN_DEFAULT, dest="b3_margin",
+                    help=f"margin minimum prob B3 vs kelas kedua-tertinggi model lama (default {B3_MARGIN_DEFAULT})")
     ap.add_argument("--vote", type=int, default=VOTE_FRAMES_DEFAULT,
                     help=f"jumlah frame dirata-ratain per keputusan, 1=matiin (default {VOTE_FRAMES_DEFAULT})")
     ap.add_argument("--vote-delay", type=float, default=VOTE_DELAY_DEFAULT, dest="vote_delay",
                     help=f"jeda antar-frame voting, detik (default {VOTE_DELAY_DEFAULT})")
     args = ap.parse_args()
 
-    # Ensemble: utama = model baru, pembanding/penjaga = model lama.
+    # Ensemble: PRIMARY = model_fp16_v5_daunasli.tflite ("baru21"), bukan model_fp16.tflite lagi.
+    # Guard B3 tetap model lama ("lama" = model_advanced.tflite).
     if args.ensemble:
-        args.model = "baru"
+        args.model = ENSEMBLE_PRIMARY_KEY
 
     model_path = resolve_model(args.model)
     it, inp, out = load_interp(model_path)
@@ -229,18 +274,23 @@ def main():
     # Muat model pembanding (buat --compare) atau penjaga B3 (buat --ensemble).
     cmp_it = cmp_inp = cmp_out = cmp_name = None
     if args.compare or args.ensemble:
-        other = "lama" if args.model != "lama" else "baru"
+        if args.ensemble:
+            other = ENSEMBLE_GUARD_KEY
+        else:
+            other = "lama" if args.model != "lama" else "baru"
         cmp_path = resolve_model(other)
         cmp_it, cmp_inp, cmp_out = load_interp(cmp_path)
         cmp_name = os.path.relpath(cmp_path, ROOT)
         role = "penjaga B3" if args.ensemble else "pembanding"
         print(f"[MODEL] {role}: {cmp_name}")
     if args.ensemble:
-        print(f"[ENSEMBLE] baru utama, lama override B3 kalau prob B3 >= {args.b3_gate*100:.0f}%")
+        print(f"[ENSEMBLE] primary={ENSEMBLE_PRIMARY_KEY}, guard B3={ENSEMBLE_GUARD_KEY} "
+              f"(override B3 kalau prob B3 guard >= gate {args.b3_gate*100:.0f}% "
+              f"DAN menang >= margin {args.b3_margin*100:.0f}% dari kelas kedua-tertinggi)")
 
     if args.live:
         live_loop(it, inp, out, model_path, cmp_it, cmp_inp, cmp_out, cmp_name,
-                  ensemble=args.ensemble, gate=args.b3_gate,
+                  ensemble=args.ensemble, gate=args.b3_gate, margin=args.b3_margin,
                   vote=args.vote, vote_delay=args.vote_delay)
         return
 
@@ -288,7 +338,7 @@ def main():
                     if still >= STILL_NEED:
                         if args.ensemble:
                             label, conf, _, info = ensemble_predict(
-                                (it, inp, out), (cmp_it, cmp_inp, cmp_out), frame, args.b3_gate)
+                                (it, inp, out), (cmp_it, cmp_inp, cmp_out), frame, args.b3_gate, args.b3_margin)
                             last = (label, conf)
                             print(f"[CAM] ✓ {label} ({conf*100:.0f}%) → AKTUASI (simulasi jatuhin)")
                             print(f"      [ensemble] {info}")

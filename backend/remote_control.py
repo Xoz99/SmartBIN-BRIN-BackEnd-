@@ -334,9 +334,31 @@ class RemoteControl:
     def _power(self, name, verb):
         """Jalankan shutdown/reboot. Dijalankan di thread terpisah supaya ack
         masih sempat ke-publish SEBELUM sistem mati (kalau jalan di thread
-        dispatcher, proses keburu shutdown dan ack gak keluar)."""
+        dispatcher, proses keburu shutdown dan ack gak keluar).
+
+        Kegagalan TIDAK dibungkam: kalau `sudo` minta password (belum ada
+        NOPASSWD) atau rc != 0, errornya di-print — kelihatan di log remote
+        (kalau streaming nyala) maupun di stderr journal systemd. Sebelumnya
+        return code dibuang, jadi shutdown yang gagal terlihat sukses."""
+        import subprocess as _sp
         import threading as _t
-        _t.Thread(target=lambda: os.system(f"sudo {verb}"), daemon=True).start()
+
+        def _do():
+            try:
+                r = _sp.run(["sudo", verb], capture_output=True, text=True, timeout=30)
+                if r.returncode != 0:
+                    msg = (r.stderr or r.stdout).strip()
+                    print(f"[Remote] {name} GAGAL rc={r.returncode}: {msg or 'tanpa pesan error'}")
+                else:
+                    print(f"[Remote] {name} dipicu (rc=0).")
+            except _sp.TimeoutExpired:
+                print(f"[Remote] {name} timeout 30s — sudo menggantung? cek /etc/sudoers.d")
+            except Exception as _e:
+                print(f"[Remote] {name} gagal: {_e}")
+
+        _t.Thread(target=_do, daemon=True).start()
+        # ack tetap "scheduled" — hasil nyata tampil lewat log di atas, karena
+        # kalau sukses sistemnya langsung mati sebelum sempat balas ack lain.
         return {"action": name, "scheduled": True}
 
     def _restart_main(self, name):

@@ -1,6 +1,6 @@
 """
 Training ulang model utama SmartBIN (organik / anorganik / B3) — EfficientNetB0.
-Dijalankan di Google Colab. Output: model_fp16.tflite yang KOMPATIBEL dengan
+Dijalankan di Kaggle Notebook. Output: model_fp16.tflite yang KOMPATIBEL dengan
 backend/main.py tanpa perlu ubah kode di Raspi.
 
 ===================================================================
@@ -16,12 +16,12 @@ ATURAN WAJIB biar model nyambung ke main.py (JANGAN dilanggar):
   4. Export TFLite fp16 (bobot fp16, input/output tetap float32).
 ===================================================================
 
-Cara pakai (Colab):
-  - Export dataset dari Roboflow: format "Folder Structure" (classification),
-    bukan COCO/YOLO. Nanti dapet folder train/ valid/ test/ berisi
-    subfolder Anorganik/ B3/ Organik/.
-  - Set DATA_DIR ke lokasi hasil unzip.
-  - Jalankan sel per sel.
+Cara pakai (Kaggle):
+  - Pastikan Accelerator = GPU T4 x2 / P100 (Settings panel kanan).
+  - DATA_DIR di bawah ini sudah diarahkan ke output merge_datasets.py
+    (/kaggle/working/smartbin-dataset).
+  - Jalankan sel per sel. Model final ada di /kaggle/working/model_fp16.tflite
+    -> download lewat panel "Output" di sidebar kanan Kaggle.
 """
 
 import tensorflow as tf
@@ -29,12 +29,19 @@ from tensorflow.keras import layers, models
 import numpy as np
 
 # ---- Konfigurasi ----
-DATA_DIR   = "/content/smartbin-dataset"   # ganti: hasil export Roboflow (ada train/ valid/)
+DATA_DIR   = "/kaggle/working/smartbin-dataset"   # hasil merge_datasets.py
 IMG_SIZE   = (224, 224)
 BATCH      = 32
 EPOCHS_HEAD = 12       # tahap 1: latih kepala (base beku)
 EPOCHS_FT   = 8        # tahap 2: fine-tune sebagian base
 CLASS_ORDER = ["Anorganik", "B3", "Organik"]  # HARUS urutan ini
+
+# ---- 0. Cek GPU aktif (biar gak ketauan lama-lama baru sadar CPU) ----
+gpus = tf.config.list_physical_devices('GPU')
+print("GPU terdeteksi:", gpus)
+if not gpus:
+    print("⚠️  GPU KOSONG — training bakal lambat banget di CPU. "
+          "Aktifin GPU di Settings (kanan) -> Accelerator -> GPU T4 x2 / P100, lalu restart session.")
 
 # ---- 1. Load dataset (piksel MENTAH 0-255, jangan dinormalisasi) ----
 train_ds = tf.keras.utils.image_dataset_from_directory(
@@ -141,7 +148,7 @@ converter.optimizations = [tf.lite.Optimize.DEFAULT]
 converter.target_spec.supported_types = [tf.float16]   # bobot fp16
 tflite_model = converter.convert()
 
-out_path = "/content/model_fp16.tflite"
+out_path = "/kaggle/working/model_fp16.tflite"
 with open(out_path, "wb") as f:
     f.write(tflite_model)
 print(f"\nTersimpan: {out_path} ({len(tflite_model)/1e6:.1f} MB)")
@@ -156,7 +163,6 @@ print("Output:", outp["shape"], outp["dtype"], "  (harus [1 3] float32)")
 
 # ---- 8. Uji cepat 1 gambar MENTAH (tanpa normalisasi apa pun) ----
 # Pastikan hasilnya masuk akal sebelum dikirim ke Raspi.
-import os
 sample = None
 for cls in CLASS_ORDER:
     fs = list(pathlib.Path(f"{DATA_DIR}/valid/{cls}").glob("*"))
@@ -171,7 +177,7 @@ if sample:
     print(f"Uji {sample} (asli={expect}) -> "
           f"{dict(zip(CLASS_ORDER, [round(float(x), 3) for x in prob]))}")
 
-# Download model_fp16.tflite dari Colab:
-#   from google.colab import files; files.download("/content/model_fp16.tflite")
-# Lalu scp ke Raspi:
-#   scp model_fp16.tflite brin@100.99.74.71:~/backend/model_ai_baru/model_fp16.tflite
+print("\n=== SELESAI ===")
+print("Model ada di:", out_path)
+print("Download: buka panel 'Output' di sidebar kanan Kaggle -> cari model_fp16.tflite -> Download")
+print("Lalu di laptop lu:  scp model_fp16.tflite brin@100.99.74.71:~/backend/model_ai_baru/model_fp16.tflite")

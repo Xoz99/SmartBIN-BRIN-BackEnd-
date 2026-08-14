@@ -17,6 +17,14 @@ RestartSec=3
 Environment=NODE_ID=bin-003
 Environment=REMOTE_CONTROL=1
 Environment=PYTHONUNBUFFERED=1
+# Kamera TIDAK ikut nyala waktu proses start — smartbin diam sampai admin menekan
+# "Nyalakan Smartbin" di aplikasi (action camera_start). Ini yang bikin penyortiran
+# berjalan atas perintah, bukan otomatis.
+#
+# Proses main.py sendiri tetap dibiarkan hidup terus, karena listener MQTT ada DI
+# DALAMNYA: kalau prosesnya mati, tidak ada yang menerima perintah dari aplikasi
+# dan Pi cuma bisa dibangunkan lewat SSH.
+Environment=AUTO_START_CAM=0
 
 [Install]
 WantedBy=multi-user.target
