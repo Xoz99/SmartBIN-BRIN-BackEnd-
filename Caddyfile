@@ -1,9 +1,12 @@
 # Backend SmartBIN di root domain smartbin.sbs.
-# Caddy otomatis ambil sertifikat HTTPS Let's Encrypt (GRATIS) —
-# syarat: DNS smartbin.sbs sudah nunjuk ke IP VPS + port 80/443 terbuka.
+# Site ada DI BELAKANG Cloudflare (proxy). Sertifikat pakai Cloudflare Origin
+# Certificate (valid 15 tahun) — BUKAN Let's Encrypt lagi, biar gak gagal
+# perpanjang di belakang proxy Cloudflare. File cert di-mount di /etc/caddy/certs
+# (lihat volume `./certs` di docker-compose.prod.yml). Cloudflare SSL mode: Full (strict).
 # reverse_proxy otomatis dukung WebSocket (wss://) juga.
 
 smartbin.sbs {
+	tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin-key.pem
 	# Inference kamera admin (EfficientNet TFLite) → service predict.
 	handle /predict* {
 		reverse_proxy predict:9000
@@ -16,5 +19,6 @@ smartbin.sbs {
 
 # (opsional) redirect www → root
 www.smartbin.sbs {
+	tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin-key.pem
 	redir https://smartbin.sbs{uri}
 }

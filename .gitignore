@@ -12,6 +12,9 @@ firebase-credentials.json
 # Sertifikat HTTPS self-signed (untuk kamera HP)
 cert.pem
 key.pem
+
+# Cloudflare Origin Certificate (private key RAHASIA — jangan di-commit)
+certs/
 venv/
 .venv/
 
