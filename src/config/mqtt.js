@@ -50,23 +50,32 @@ export async function connectMqtt() {
     await new Promise((resolve, reject) => {
         if (client.connected) return resolve();
 
+        // Handler error KHUSUS fase connect awal. WAJIB dilepas begitu connect
+        // sukses — kalau nyangkut, error runtime pertama (mis. broker drop) bakal
+        // manggil client.end(true) & mqttClient=null → auto-reconnect mati permanen.
+        const onInitError = (err) => {
+            clearTimeout(timeout);
+            client.removeListener('connect', onConnect);
+            client.end(true);
+            mqttClient = null;
+            reject(err);
+        };
+        const onConnect = () => {
+            clearTimeout(timeout);
+            client.removeListener('error', onInitError); // lepas: biarin lib auto-reconnect kalau nanti drop
+            resolve();
+        };
+
         const timeout = setTimeout(() => {
-            client.removeAllListeners('connect');
+            client.removeListener('connect', onConnect);
+            client.removeListener('error', onInitError);
             client.end(true);
             mqttClient = null;
             reject(new Error(`MQTT connection timeout — broker at ${env.MQTT_BROKER_URL} unreachable`));
         }, 10_000);
 
-        client.once('connect', () => {
-            clearTimeout(timeout);
-            resolve();
-        });
-        client.once('error', (err) => {
-            clearTimeout(timeout);
-            client.end(true);
-            mqttClient = null;
-            reject(err);
-        });
+        client.once('connect', onConnect);
+        client.once('error', onInitError);
     });
     return client;
 }
