@@ -10,10 +10,13 @@ Jalankan:
   python sim_platform.py                 # default: model BARU (model_ai_baru/model_fp16.tflite)
   python sim_platform.py --model lama     # model lama (model_advanced.tflite)
   python sim_platform.py --model baru32   # model baru presisi fp32
+  python sim_platform.py --model keras    # model .keras langsung (butuh TensorFlow)
+  python sim_platform.py --model path/ke/model.keras       # atau path bebas
   python sim_platform.py --compare        # jalanin lama + baru bareng, adu prediksi tiap deteksi
   python sim_platform.py --ensemble       # ensemble: primary & guard default (lihat ENSEMBLE_PRIMARY_KEY/ENSEMBLE_GUARD_KEY)
   python sim_platform.py --ensemble --ens-primary rpp32 --ens-guard baru3   # override kombinasi ensemble lewat CLI
-Preprocessing & urutan kelas SAMA dgn main.py (EfficientNet pass-through).
+Preprocessing & urutan kelas SAMA dgn main.py (EfficientNet pass-through) —
+berlaku untuk .tflite maupun .keras, jadi perbandingannya adil.
 """
 import argparse
 import os
@@ -34,21 +37,128 @@ MODELS = {
     "baru32": os.path.join(ROOT, "model_ai_baru", "model_fp32.tflite"),
     "rpp32": os.path.join(ROOT, "model_ai_baru", "an_or32.tflite"),
     "rpp16": os.path.join(ROOT, "backend", "rapip16.tflite"),
+    # HATI-HATI: ada 3 file berbeda bernama model_advanced.tflite (root, backend/,
+    # model_ai_baru/) dengan md5 berbeda. "adv" = yang di model_ai_baru (konversi
+    # terbaru dari model_sampah_Advanced.keras), "lama" = yang di root.
+    "adv":    os.path.join(ROOT, "model_ai_baru", "model_advanced.tflite"),
+    "keras":  os.path.join(ROOT, "model_ai_baru", "best_model.keras"),
+    "keras2": os.path.join(ROOT, "backend", "model_keras_ai", "model_sampah_Advanced.keras"),
+    "lunak":  os.path.join(ROOT, "model_ai_baru", "model_advanced.tflite"),
+
 }
 
 # Default kombinasi ensemble kalau --ens-primary / --ens-guard tidak dikasih.
 # Bisa di-override lewat CLI tanpa ubah kode, buat A/B test kombinasi lain.
-ENSEMBLE_PRIMARY_KEY = "rpp32"
-ENSEMBLE_GUARD_KEY    = "baru3"
+ENSEMBLE_PRIMARY_KEY = "lama"
+ENSEMBLE_GUARD_KEY    = "rpp32"
 
 
 def resolve_model(name):
-    """Terima keyword (lama/baru/baru32) atau path langsung ke file .tflite."""
+    """Terima keyword (lama/baru/keras/...) atau path langsung ke file model
+    (.tflite, .keras, atau .h5)."""
     return MODELS.get(name, name)
 
 
+def _custom_layers(tf):
+    """Layer custom yang dipakai model tim AI (model_sampah_Advanced.keras =
+    EfficientNet-B3 + channel attention). Tanpa ini load_model gagal dengan
+    "Could not locate class 'ChannelAttentionLayer'".
+
+    Definisi disalin dari 'backend/versi utk desktop/main.py:69' — kalau di sana
+    berubah, samain di sini, kalau tidak bobot model ter-load ke arsitektur yang
+    salah dan prediksinya diam-diam ngaco.
+    """
+    layers = tf.keras.layers
+
+    class ChannelAttentionLayer(layers.Layer):
+        def __init__(self, reduction_ratio=16, **kwargs):
+            super().__init__(**kwargs)
+            self.reduction_ratio = reduction_ratio
+
+        def build(self, input_shape):
+            ch = input_shape[-1]
+            self.gap = layers.GlobalAveragePooling2D()
+            self.gmp = layers.GlobalMaxPooling2D()
+            self.fc1 = layers.Dense(max(1, ch // self.reduction_ratio),
+                                    activation="relu", use_bias=False)
+            self.fc2 = layers.Dense(ch, activation="sigmoid", use_bias=False)
+            super().build(input_shape)
+
+        def call(self, x):
+            avg_w = self.fc2(self.fc1(self.gap(x)))
+            max_w = self.fc2(self.fc1(self.gmp(x)))
+            ch    = tf.shape(x)[-1]
+            scale = tf.reshape(avg_w + max_w, [-1, 1, 1, ch])
+            return x * scale
+
+        def get_config(self):
+            cfg = super().get_config()
+            cfg.update({"reduction_ratio": self.reduction_ratio})
+            return cfg
+
+    return {"ChannelAttentionLayer": ChannelAttentionLayer}
+
+
+class KerasShim:
+    """Bungkus model Keras biar antarmukanya sama persis dgn tflite Interpreter.
+
+    Alasannya: classify(), classify_vote(), dan jalur ensemble semuanya bicara
+    dalam bahasa set_tensor/invoke/get_tensor. Dengan shim ini nol baris di sana
+    yang perlu diubah, dan .keras vs .tflite jadi bisa diadu apple-to-apple.
+
+    TensorFlow di-import di dalam __init__, bukan di atas file — biar yang cuma
+    pakai .tflite tidak kena beban import TF (berat, ~10 dtk).
+    """
+
+    def __init__(self, path):
+        try:
+            import tensorflow as tf
+        except ImportError:
+            raise SystemExit(
+                f"'{os.path.basename(path)}' butuh TensorFlow (model .keras belum dikonversi).\n"
+                f"  pasang:  pip install tensorflow\n"
+                f"  atau pakai versi .tflite-nya lewat --model <keyword lain>"
+            )
+        self.model = tf.keras.models.load_model(
+            path, compile=False, custom_objects=_custom_layers(tf))
+        ish = self.model.input_shape         # (None, H, W, 3)
+        osh = self.model.output_shape        # (None, n_kelas)
+        # quantization (0.0, 0) = tidak terkuantisasi; dibaca oleh pemanggil yg
+        # meniru _run() main.py.
+        self._in = {"index": 0, "shape": [1, int(ish[1]), int(ish[2]), int(ish[3])],
+                    "dtype": np.float32, "quantization": (0.0, 0)}
+        self._out = {"index": 0, "shape": [1, int(osh[-1])],
+                     "dtype": np.float32, "quantization": (0.0, 0)}
+        self._x = None
+        self._y = None
+
+    def allocate_tensors(self):
+        pass
+
+    def get_input_details(self):
+        return [self._in]
+
+    def get_output_details(self):
+        return [self._out]
+
+    def set_tensor(self, index, value):
+        self._x = value
+
+    def invoke(self):
+        self._y = self.model.predict(self._x, verbose=0)
+
+    def get_tensor(self, index):
+        return self._y
+
+
 def load_interp(path):
-    it = Interpreter(model_path=path)
+    """Muat model apa pun (.tflite / .keras / .h5) → (interp, input_detail, output_detail)."""
+    if not os.path.exists(path):
+        raise SystemExit(f"model tidak ditemukan: {path}")
+    if path.lower().endswith((".keras", ".h5")):
+        it = KerasShim(path)
+    else:
+        it = Interpreter(model_path=path)
     it.allocate_tensors()
     return it, it.get_input_details()[0], it.get_output_details()[0]
 
@@ -64,6 +174,11 @@ from PIL import Image
 
 # ── Config (sama dgn main.py; ubah di sini buat coba-coba) ──
 ROI_FRAC     = 0.6
+# Geser pusat ROI (fraksi lebar/tinggi frame) — ada di main.py buat kamera Pi yang
+# tidak lurus di atas buletan. Di webcam laptop biasanya 0, tapi tetap disediakan
+# supaya sim bisa niru setelan Pi persis: --roi-frac 0.74 --roi-dx 0.12 --roi-dy 0.065
+ROI_DX       = 0.0
+ROI_DY       = 0.0
 OBJECT_DIFF  = 18.0   # beda dari kosong utk dianggap ada objek
 CLEAR_DIFF   = 9.0
 STILL_MOVE   = 4.0    # gerak antar-frame di bawah ini = objek diam
@@ -77,11 +192,18 @@ CLASS = ["Anorganik", "B3", "Organik"]
 COLOR = {"Anorganik": (153, 124, 91), "B3": (94, 90, 209), "Organik": (108, 132, 72)}  # BGR
 
 
-def center_roi(frame, frac):
+def center_roi(frame, frac, dx=None, dy=None):
+    """Salinan _center_roi() main.py (termasuk clamp biar kotak tidak keluar frame).
+    Kalau yang di main.py berubah, samain di sini — kalau tidak, sim berhenti
+    memprediksi Pi dan semua perbandingan jadi menyesatkan."""
     h, w = frame.shape[:2]
-    s = int(min(h, w) * frac)
-    cy, cx = h // 2, w // 2
-    y0, x0 = max(0, cy - s // 2), max(0, cx - s // 2)
+    s = int(min(h, w) * max(0.1, min(1.0, frac)))
+    dx = ROI_DX if dx is None else dx
+    dy = ROI_DY if dy is None else dy
+    x0 = int(w / 2 + dx * w) - s // 2
+    y0 = int(h / 2 + dy * h) - s // 2
+    x0 = max(0, min(w - s, x0))
+    y0 = max(0, min(h - s, y0))
     return frame[y0:y0 + s, x0:x0 + s], (x0, y0, s)
 
 
@@ -121,46 +243,102 @@ def classify_vote(interp, inp, out, rois):
 
 
 LIVE_EVERY = 1.2      # jeda antar klasifikasi di mode --live (detik)
-# B3_GATE dinaikkan dari 0.55 → 0.70: threshold lama kelewat gampang kelewatin,
-# daun kering sering bikin model lama ngasih prob B3 56-66% (false positive).
-B3_GATE_DEFAULT = 0.70   # prob B3 model guard >= ini → kandidat override B3
+# Gate DISAMAIN dgn B3_GATE main.py (0.55) supaya sim memprediksi Pi. Dulu di sini
+# 0.70 karena daun kering bikin model lama ngasih B3 56-66%; masalah itu sekarang
+# ditangani margin + primary-floor, bukan dengan naikin gate. Mau balik ke perilaku
+# lama: --b3-gate 0.70
+B3_GATE_DEFAULT = 0.55   # prob B3 model guard >= ini → kandidat override B3
 # Margin tambahan: prob B3 model guard harus menang telak dari kelas kedua-tertingginya
 # (bukan cuma lewat gate tipis-tipis), biar B3 "ragu-ragu" tidak maksa override.
 B3_MARGIN_DEFAULT = 0.15
+# Lantai (veto) primary: guard cuma boleh maksa B3 kalau model primary SETUJU
+# minimal segini di kelas B3. Guard (model_combo) ternyata bisa ngasih B3 93-96%
+# buat daun — gate/margin nggak nyaring itu karena dua-duanya cuma ngukur si guard
+# sendiri. Butuh suara kedua: kalau primary bilang B3 cuma ~beberapa persen,
+# override dibatalin. Set 0 buat matiin veto (perilaku lama).
+B3_PRIMARY_FLOOR_DEFAULT = 0.15
 VOTE_FRAMES_DEFAULT = 5   # jumlah frame yg dirata-ratain (1 = matiin voting)
 VOTE_DELAY_DEFAULT  = 0.03
+# Cara dua model digabung — sama persis dgn ENSEMBLE_MODE di main.py:
+#   guard     = argmax primary, guard cuma boleh MEMAKSA jadi B3 (perilaku lama)
+#   avg       = rata-rata tertimbang probabilitas dua model, baru gerbang B3
+#   confident = ikut model yang probabilitas tertingginya lebih besar
+ENS_MODE_DEFAULT    = "guard"
+GUARD_WEIGHT_DEFAULT = 0.5
 
 
-def _b3_should_override(o_p, gate, margin):
-    """True kalau prob B3 model guard (a) >= gate DAN (b) menang dari kelas
-    kedua-tertinggi minimal `margin`. Dua syarat ini nyaring B3 'ragu-ragu'
-    yang selama ini nyasar (mis. daun kering ke-vote B3 56-66%)."""
+def _gabung(n_p, o_p, mode, w):
+    """Gabungkan probabilitas primary (n_p) & guard (o_p) sesuai mode.
+    Return (probs_gabungan, keterangan_asal)."""
+    if mode == "avg":
+        w = max(0.0, min(1.0, w))
+        return n_p * (1.0 - w) + o_p * w, f"avg(w={w:.2f})"
+    if mode == "confident":
+        pakai_guard = float(np.max(o_p)) > float(np.max(n_p))
+        return (o_p, "guard") if pakai_guard else (n_p, "primary")
+    return n_p, "primary"
+
+
+def _b3_should_override(o_p, gate, margin, n_p=None, primary_floor=0.0):
+    """Putusin apakah hasil dipaksa jadi B3. Tiga syarat, semua harus lolos:
+      (a) prob B3 guard >= gate
+      (b) B3 guard menang >= margin dari kelas kedua-tertingginya
+      (c) prob B3 primary >= primary_floor  (veto: butuh suara kedua)
+    Return (lolos, o_b3, second_max, n_b3, daftar_alasan_gagal)."""
     b3_i = CLASS.index("B3")
     o_b3 = float(o_p[b3_i])
     others = [float(v) for i, v in enumerate(o_p) if i != b3_i]
     second_max = max(others) if others else 0.0
-    return (o_b3 >= gate) and (o_b3 - second_max >= margin), o_b3, second_max
+    n_b3 = float(n_p[b3_i]) if n_p is not None else None
+
+    gagal = []
+    if o_b3 < gate:
+        gagal.append(f"guard B3 {o_b3*100:.0f}% < gate {gate*100:.0f}%")
+    if o_b3 - second_max < margin:
+        gagal.append(f"margin {(o_b3 - second_max)*100:.0f}% < {margin*100:.0f}%")
+    if n_b3 is not None and primary_floor > 0 and n_b3 < primary_floor:
+        gagal.append(f"primary B3 {n_b3*100:.0f}% < floor {primary_floor*100:.0f}% (VETO)")
+    return (not gagal), o_b3, second_max, n_b3, gagal
 
 
-def ensemble_predict(new_t, old_t, frame, gate, margin=B3_MARGIN_DEFAULT):
+def _info_override(o_b3, second_max, n_b3, gate, margin, n_lbl, n_conf):
+    return (f"gerbang B3 → guard B3={o_b3*100:.0f}% (gate {gate*100:.0f}%, "
+            f"margin {(o_b3 - second_max)*100:.0f}%>={margin*100:.0f}%"
+            + (f", primary B3={n_b3*100:.0f}%" if n_b3 is not None else "")
+            + f") (primary bilang {n_lbl} {n_conf*100:.0f}%)")
+
+
+def _info_primary(o_b3, n_lbl, n_conf, n_b3, gagal, sumber="primary"):
+    # Prob B3 primary ikut dicetak di dua-dua cabang — itu angka yang dipakai
+    # buat nyetel --b3-primary-floor dari data lapangan, bukan tebak-tebakan.
+    pb = f", primary B3={n_b3*100:.0f}%" if n_b3 is not None else ""
+    return (f"ikut {sumber} → {n_lbl} {n_conf*100:.0f}%  "
+            f"[guard B3={o_b3*100:.0f}%{pb} ditolak: " + "; ".join(gagal) + "]")
+
+
+def ensemble_predict(new_t, old_t, frame, gate, margin=B3_MARGIN_DEFAULT,
+                     primary_floor=B3_PRIMARY_FLOOR_DEFAULT,
+                     mode=ENS_MODE_DEFAULT, guard_weight=GUARD_WEIGHT_DEFAULT):
     """Gabung dua model: model PRIMARY jadi utama (unggul anorganik/organik),
     model GUARD jadi penjaga B3. Override ke B3 HANYA kalau prob B3 guard
     >= gate DAN menang telak (margin) dari kelas kedua-tertingginya; selain itu
     ikut model primary. Return (label, conf, probs, alasan)."""
     n_lbl, n_conf, n_p = classify(new_t[0], new_t[1], new_t[2], frame)
     o_lbl, o_conf, o_p = classify(old_t[0], old_t[1], old_t[2], frame)
-    override, o_b3, second_max = _b3_should_override(o_p, gate, margin)
+    if mode != "guard":
+        n_p, _ = _gabung(n_p, o_p, mode, guard_weight)
+        i = int(np.argmax(n_p))
+        n_lbl, n_conf = CLASS[i], float(n_p[i])
+    override, o_b3, second_max, n_b3, gagal = _b3_should_override(
+        o_p, gate, margin, n_p, primary_floor)
     if override:
-        info = (f"gerbang B3 → guard B3={o_b3*100:.0f}% (>= gate {gate*100:.0f}%, "
-                 f"margin {(o_b3 - second_max)*100:.0f}% >= {margin*100:.0f}%) "
-                 f"(primary bilang {n_lbl} {n_conf*100:.0f}%)")
-        return "B3", o_b3, o_p, info
-    info = (f"ikut primary → {n_lbl} {n_conf*100:.0f}% "
-            f"(guard B3={o_b3*100:.0f}%, gate {gate*100:.0f}%, margin {(o_b3-second_max)*100:.0f}%<{margin*100:.0f}%)")
-    return n_lbl, n_conf, n_p, info
+        return "B3", o_b3, o_p, _info_override(o_b3, second_max, n_b3, gate, margin, n_lbl, n_conf)
+    return n_lbl, n_conf, n_p, _info_primary(o_b3, n_lbl, n_conf, n_b3, gagal)
 
 
-def ensemble_vote(new_t, old_t, rois, gate, margin=B3_MARGIN_DEFAULT):
+def ensemble_vote(new_t, old_t, rois, gate, margin=B3_MARGIN_DEFAULT,
+                  primary_floor=B3_PRIMARY_FLOOR_DEFAULT,
+                  mode=ENS_MODE_DEFAULT, guard_weight=GUARD_WEIGHT_DEFAULT):
     """Ensemble + voting: rata-ratain probabilitas model primary & probabilitas
     PENUH model guard (bukan cuma B3) dari beberapa frame, baru terapkan
     gerbang B3 (gate + margin) atas rata-rata itu."""
@@ -170,20 +348,32 @@ def ensemble_vote(new_t, old_t, rois, gate, margin=B3_MARGIN_DEFAULT):
         _, _, p = classify(old_t[0], old_t[1], old_t[2], r)
         old_acc = p if old_acc is None else old_acc + p
     o_p = old_acc / len(rois)
-    override, o_b3, second_max = _b3_should_override(o_p, gate, margin)
+
+    # Gabung dulu (kalau modenya bukan "guard"), gerbang B3 jalan di ATAS hasil
+    # gabungan — urutan ini sama persis dgn _predict_vote() main.py.
+    asal = "primary"
+    if mode != "guard":
+        p_awal, l_awal, c_awal = n_p, n_lbl, n_conf
+        n_p, asal = _gabung(n_p, o_p, mode, guard_weight)
+        i = int(np.argmax(n_p))
+        n_lbl, n_conf = CLASS[i], float(n_p[i])
+        print(f"[ENS ] {mode} → {n_lbl} {n_conf*100:.0f}% via {asal} "
+              f"[primary {l_awal} {c_awal*100:.0f}% | guard {CLASS[int(np.argmax(o_p))]} "
+              f"{float(np.max(o_p))*100:.0f}%]")
+
+    override, o_b3, second_max, n_b3, gagal = _b3_should_override(
+        o_p, gate, margin, n_p, primary_floor)
     if override:
-        info = (f"gerbang B3 → guard B3={o_b3*100:.0f}% (>= gate {gate*100:.0f}%, "
-                 f"margin {(o_b3 - second_max)*100:.0f}% >= {margin*100:.0f}%) "
-                 f"(primary bilang {n_lbl} {n_conf*100:.0f}%)")
-        return "B3", o_b3, n_p, info
-    info = (f"ikut primary → {n_lbl} {n_conf*100:.0f}% "
-            f"(guard B3={o_b3*100:.0f}%, gate {gate*100:.0f}%, margin {(o_b3-second_max)*100:.0f}%<{margin*100:.0f}%)")
-    return n_lbl, n_conf, n_p, info
+        return "B3", o_b3, n_p, _info_override(o_b3, second_max, n_b3, gate, margin, n_lbl, n_conf)
+    return n_lbl, n_conf, n_p, _info_primary(
+        o_b3, n_lbl, n_conf, n_b3, gagal, "primary" if mode == "guard" else f"gabungan({mode})")
 
 
 def live_loop(it, inp, out, model_path, cmp_it, cmp_inp, cmp_out, cmp_name,
               ensemble=False, gate=B3_GATE_DEFAULT, margin=B3_MARGIN_DEFAULT,
-              vote=VOTE_FRAMES_DEFAULT, vote_delay=VOTE_DELAY_DEFAULT):
+              primary_floor=B3_PRIMARY_FLOOR_DEFAULT,
+              vote=VOTE_FRAMES_DEFAULT, vote_delay=VOTE_DELAY_DEFAULT,
+              mode=ENS_MODE_DEFAULT, guard_weight=GUARD_WEIGHT_DEFAULT):
     """Mode tes model: arahin objek ke kotak, prediksi jalan terus tanpa aktuator."""
     cap = cv2.VideoCapture(0)
     next_at = 0.0
@@ -207,7 +397,8 @@ def live_loop(it, inp, out, model_path, cmp_it, cmp_inp, cmp_out, cmp_name,
                 rois = [roi]
             if ensemble:
                 label, conf, probs, info = ensemble_vote(
-                    (it, inp, out), (cmp_it, cmp_inp, cmp_out), rois, gate, margin)
+                    (it, inp, out), (cmp_it, cmp_inp, cmp_out), rois, gate, margin,
+                    primary_floor, mode, guard_weight)
                 last = (label, conf, probs)
                 print(f"[ENS ] {label:10s} ({conf*100:3.0f}%)   {info}")
             else:
@@ -227,7 +418,7 @@ def live_loop(it, inp, out, model_path, cmp_it, cmp_inp, cmp_out, cmp_name,
             c = COLOR.get(lbl, (200, 200, 200))
             cv2.putText(frame, f"{lbl} {cf*100:.0f}%", (x0, max(28, y0 - 12)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, c, 2)
-        tag = (f"LIVE ENSEMBLE  primary + guard(B3>={gate*100:.0f}%)" if ensemble
+        tag = (f"LIVE ENSEMBLE [{mode}]  primary + guard(B3>={gate*100:.0f}%)" if ensemble
                else f"LIVE  model: {os.path.basename(model_path)}")
         cv2.putText(frame, tag,
                     (10, frame.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 255), 1)
@@ -243,6 +434,10 @@ def live_loop(it, inp, out, model_path, cmp_it, cmp_inp, cmp_out, cmp_name,
 
 
 def main():
+    # ROI dipakai lewat global (center_roi & grab_rois baca dari sini), jadi
+    # deklarasinya harus di atas sebelum ROI_FRAC dibaca sebagai default argparse.
+    global ROI_FRAC, ROI_DX, ROI_DY
+
     ap = argparse.ArgumentParser(description="Simulasi EcoSort + tes model AI")
     ap.add_argument("--model", default="baru",
                     help="lama | baru | baru32 | path ke .tflite (default: baru)")
@@ -261,11 +456,31 @@ def main():
                     help=f"ambang prob B3 model guard utk override ke B3 (default {B3_GATE_DEFAULT})")
     ap.add_argument("--b3-margin", type=float, default=B3_MARGIN_DEFAULT, dest="b3_margin",
                     help=f"margin minimum prob B3 vs kelas kedua-tertinggi model guard (default {B3_MARGIN_DEFAULT})")
+    ap.add_argument("--b3-primary-floor", type=float, default=B3_PRIMARY_FLOOR_DEFAULT,
+                    dest="b3_primary_floor",
+                    help=f"prob B3 minimum model PRIMARY biar override guard diterima; "
+                         f"0=matiin veto (default {B3_PRIMARY_FLOOR_DEFAULT})")
     ap.add_argument("--vote", type=int, default=VOTE_FRAMES_DEFAULT,
                     help=f"jumlah frame dirata-ratain per keputusan, 1=matiin (default {VOTE_FRAMES_DEFAULT})")
     ap.add_argument("--vote-delay", type=float, default=VOTE_DELAY_DEFAULT, dest="vote_delay",
                     help=f"jeda antar-frame voting, detik (default {VOTE_DELAY_DEFAULT})")
+    ap.add_argument("--ens-mode", default=ENS_MODE_DEFAULT, dest="ens_mode",
+                    choices=["guard", "avg", "confident"],
+                    help=f"cara gabung 2 model, sama dgn ENSEMBLE_MODE main.py "
+                         f"(default {ENS_MODE_DEFAULT})")
+    ap.add_argument("--guard-weight", type=float, default=GUARD_WEIGHT_DEFAULT,
+                    dest="guard_weight",
+                    help=f"bobot guard di --ens-mode avg (default {GUARD_WEIGHT_DEFAULT})")
+    ap.add_argument("--roi-frac", type=float, default=ROI_FRAC, dest="roi_frac",
+                    help=f"sisi ROI, fraksi sisi terpendek frame (default {ROI_FRAC})")
+    ap.add_argument("--roi-dx", type=float, default=ROI_DX, dest="roi_dx",
+                    help="geser pusat ROI, fraksi LEBAR frame, + = kanan (default 0)")
+    ap.add_argument("--roi-dy", type=float, default=ROI_DY, dest="roi_dy",
+                    help="geser pusat ROI, fraksi TINGGI frame, + = bawah (default 0)")
     args = ap.parse_args()
+
+    ROI_FRAC, ROI_DX, ROI_DY = args.roi_frac, args.roi_dx, args.roi_dy
+    print(f"[ROI] frac={ROI_FRAC:.2f} dx={ROI_DX:+.3f} dy={ROI_DY:+.3f}")
 
     # Ensemble: primary/guard sekarang bisa dituker lewat CLI (--ens-primary/--ens-guard)
     # tanpa ubah kode, buat A/B test kombinasi model dengan cepat.
@@ -289,14 +504,20 @@ def main():
         role = "penjaga B3" if args.ensemble else "pembanding"
         print(f"[MODEL] {role}: {cmp_name}")
     if args.ensemble:
+        print(f"[ENSEMBLE] mode={args.ens_mode}"
+              + (f" (bobot guard {args.guard_weight:.2f})" if args.ens_mode == "avg" else ""))
         print(f"[ENSEMBLE] primary={args.ens_primary}, guard B3={args.ens_guard} "
-              f"(override B3 kalau prob B3 guard >= gate {args.b3_gate*100:.0f}% "
-              f"DAN menang >= margin {args.b3_margin*100:.0f}% dari kelas kedua-tertinggi)")
+              f"(override B3 kalau prob B3 guard >= gate {args.b3_gate*100:.0f}%, "
+              f"menang >= margin {args.b3_margin*100:.0f}% dari kelas kedua-tertinggi, "
+              + (f"DAN prob B3 primary >= floor {args.b3_primary_floor*100:.0f}%)"
+                 if args.b3_primary_floor > 0 else "veto primary MATI)"))
 
     if args.live:
         live_loop(it, inp, out, model_path, cmp_it, cmp_inp, cmp_out, cmp_name,
                   ensemble=args.ensemble, gate=args.b3_gate, margin=args.b3_margin,
-                  vote=args.vote, vote_delay=args.vote_delay)
+                  primary_floor=args.b3_primary_floor,
+                  vote=args.vote, vote_delay=args.vote_delay,
+                  mode=args.ens_mode, guard_weight=args.guard_weight)
         return
 
     cap = cv2.VideoCapture(0)
@@ -341,14 +562,19 @@ def main():
                 if obj_diff > OBJECT_DIFF and move < STILL_MOVE:
                     still += 1
                     if still >= STILL_NEED:
+                        # Input model = crop ROI, bukan frame penuh — samain dgn
+                        # CLASSIFY_ROI di main.py. Kalau di sini frame penuh, sim
+                        # ngasih hasil yang beda dari Pi buat gambar yang sama.
                         if args.ensemble:
                             label, conf, _, info = ensemble_predict(
-                                (it, inp, out), (cmp_it, cmp_inp, cmp_out), frame, args.b3_gate, args.b3_margin)
+                                (it, inp, out), (cmp_it, cmp_inp, cmp_out), roi,
+                                args.b3_gate, args.b3_margin, args.b3_primary_floor,
+                                args.ens_mode, args.guard_weight)
                             last = (label, conf)
                             print(f"[CAM] ✓ {label} ({conf*100:.0f}%) → AKTUASI (simulasi jatuhin)")
                             print(f"      [ensemble] {info}")
                         else:
-                            label, conf, _ = classify(it, inp, out, frame)
+                            label, conf, _ = classify(it, inp, out, roi)
                             last = (label, conf)
                             if conf >= CONF_THRESHOLD:
                                 print(f"[CAM] ✓ {label} ({conf*100:.0f}%) → AKTUASI (simulasi jatuhin)")

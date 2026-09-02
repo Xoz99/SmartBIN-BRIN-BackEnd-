@@ -52,7 +52,11 @@ else:
 # ========================================================
 # CONFIG
 # ========================================================
-MODEL_PATH   = "model_combo.tflite"
+# Model DASAR: dipakai sendirian kalau ENSEMBLE=0, atau sebagai PENJAGA B3 kalau
+# ensemble aktif. Bisa ditukar lewat env tanpa ubah kode (samain dgn MODEL_PATH_NEW),
+# mis. MODEL_PATH=model_ai_baru/model_advanced.tflite. Path relatif dicari juga di
+# folder atas lewat _find_model().
+MODEL_PATH   = os.getenv("MODEL_PATH", "model_combo.tflite")
 FRONTEND_DIR = "../frontend"
 CLASS_NAMES  = ["Anorganik", "B3", "Organik"]
 
@@ -67,6 +71,24 @@ CLASS_NAMES  = ["Anorganik", "B3", "Organik"]
 ENSEMBLE       = os.getenv("ENSEMBLE", "1") not in ("0", "false", "False", "")
 MODEL_PATH_NEW = os.getenv("MODEL_PATH_NEW", "model_ai_baru/an_or32.tflite")
 B3_GATE        = float(os.getenv("B3_GATE", "0.55"))
+# Dua syarat tambahan, diport dari sim_platform.py setelah kasus "daun ke-vote B3":
+# gate doang cuma ngukur si guard sendiri, jadi guard yg PD salah (prob B3 93-96%
+# buat daun) lolos gampang. B3_MARGIN maksa B3 menang telak dari kelas kedua di
+# guard; B3_PRIMARY_FLOOR minta suara kedua — model utama harus setuju minimal
+# segini di B3. Set 0 buat matiin masing-masing (balik ke perilaku gate-doang).
+B3_MARGIN        = float(os.getenv("B3_MARGIN", "0.15"))
+B3_PRIMARY_FLOOR = float(os.getenv("B3_PRIMARY_FLOOR", "0.15"))
+# Cara dua model digabung:
+#   "guard"     — argmax model utama; penjaga cuma boleh MEMAKSA jadi B3 (default,
+#                 perilaku lama). Kelemahannya: pendapat penjaga soal Organik vs
+#                 Anorganik DIBUANG, walaupun sering dia yang benar. Contoh nyata:
+#                 lakban -> utama bilang Organik 53%, penjaga Anorganik 99.9%, yang
+#                 dipakai malah yang salah.
+#   "avg"       — rata-rata tertimbang probabilitas kedua model, lalu argmax.
+#                 Penjaga B3 tetap jalan di atasnya.
+#   "confident" — ikut model yang probabilitas tertingginya lebih besar.
+ENSEMBLE_MODE = os.getenv("ENSEMBLE_MODE", "guard").strip().lower()
+GUARD_WEIGHT  = float(os.getenv("GUARD_WEIGHT", "0.5"))   # bobot penjaga di mode "avg"
 # Voting antar-frame: ambil beberapa frame lalu rata-ratain probabilitasnya biar
 # keputusan lebih stabil (mengurangi loncat organik<->anorganik, mis. daun kering).
 # VOTE_FRAMES=1 → matiin voting (perilaku lama, 1 frame).
@@ -476,15 +498,93 @@ def _find_model(path):
     return alt if os.path.exists(alt) else None
 
 
+def _custom_layers(tf):
+    """Layer custom milik model tim AI (model_sampah_Advanced = EfficientNet-B3 +
+    channel attention). Tanpa ini load_model gagal: "Could not locate class
+    'ChannelAttentionLayer'". Definisi disalin dari 'versi utk desktop/main.py:69'
+    dan juga ada di sim_platform.py — kalau salah satu berubah, samain ketiganya,
+    kalau tidak bobot ter-load ke arsitektur salah dan prediksi ngaco tanpa error."""
+    layers = tf.keras.layers
+
+    class ChannelAttentionLayer(layers.Layer):
+        def __init__(self, reduction_ratio=16, **kwargs):
+            super().__init__(**kwargs)
+            self.reduction_ratio = reduction_ratio
+
+        def build(self, input_shape):
+            ch = input_shape[-1]
+            self.gap = layers.GlobalAveragePooling2D()
+            self.gmp = layers.GlobalMaxPooling2D()
+            self.fc1 = layers.Dense(max(1, ch // self.reduction_ratio),
+                                    activation="relu", use_bias=False)
+            self.fc2 = layers.Dense(ch, activation="sigmoid", use_bias=False)
+            super().build(input_shape)
+
+        def call(self, x):
+            avg_w = self.fc2(self.fc1(self.gap(x)))
+            max_w = self.fc2(self.fc1(self.gmp(x)))
+            ch    = tf.shape(x)[-1]
+            return x * tf.reshape(avg_w + max_w, [-1, 1, 1, ch])
+
+        def get_config(self):
+            cfg = super().get_config()
+            cfg.update({"reduction_ratio": self.reduction_ratio})
+            return cfg
+
+    return {"ChannelAttentionLayer": ChannelAttentionLayer}
+
+
+class _KerasShim:
+    """Bungkus model .keras biar antarmukanya sama persis dgn Interpreter tflite,
+    supaya _run() / _preprocess() / jalur ensemble tidak perlu tahu bedanya.
+
+    Di Raspi ini butuh TensorFlow penuh (tflite_runtime tidak bisa baca .keras) —
+    berat di RAM dan lambat di-import. Dipakai untuk eksperimen; untuk produksi
+    konversi dulu ke .tflite."""
+
+    def __init__(self, path):
+        import tensorflow as tf   # sengaja lokal: yang pakai tflite tidak kena beban
+        self.model = tf.keras.models.load_model(
+            path, compile=False, custom_objects=_custom_layers(tf))
+        ish, osh = self.model.input_shape, self.model.output_shape
+        self._in = [{"index": 0, "shape": [1, int(ish[1]), int(ish[2]), int(ish[3])],
+                     "dtype": np.float32, "quantization": (0.0, 0)}]
+        self._out = [{"index": 0, "shape": [1, int(osh[-1])],
+                      "dtype": np.float32, "quantization": (0.0, 0)}]
+        self._x = self._y = None
+
+    def allocate_tensors(self):
+        pass
+
+    def get_input_details(self):
+        return self._in
+
+    def get_output_details(self):
+        return self._out
+
+    def set_tensor(self, index, value):
+        self._x = value
+
+    def invoke(self):
+        self._y = self.model.predict(self._x, verbose=0)
+
+    def get_tensor(self, index):
+        return self._y
+
+
 def _load_tflite(path):
-    it = tflite.Interpreter(model_path=path)
+    """Muat model .tflite ATAU .keras/.h5 → (interp, input_details, output_details)."""
+    if path.lower().endswith((".keras", ".h5")):
+        it = _KerasShim(path)
+    else:
+        it = tflite.Interpreter(model_path=path)
     it.allocate_tensors()
     return it, it.get_input_details(), it.get_output_details()
 
 
 # Model utama: kalau ensemble aktif → model BARU; kalau file baru tak ada, jatuh ke
 # model lama (tunggal) biar deploy tetap jalan walau model baru belum dicopy.
-_primary_path = MODEL_PATH
+_primary_path = _find_model(MODEL_PATH) or MODEL_PATH
 if ENSEMBLE:
     _new = _find_model(MODEL_PATH_NEW)
     if _new:
@@ -492,6 +592,7 @@ if ENSEMBLE:
     else:
         print(f"[!] ENSEMBLE aktif tapi model baru '{MODEL_PATH_NEW}' tak ditemukan → pakai model tunggal (lama).")
 
+MODEL_LOAD_ERROR = None   # diisi kalau model utama gagal dimuat (dipakai FE)
 print(f"[+] Loading model TFLite utama dari: {_primary_path}")
 try:
     interpreter, input_details, output_details = _load_tflite(_primary_path)
@@ -501,14 +602,22 @@ try:
     print(f"[+] Model utama loaded! Input: {IN_W}x{IN_H}, dtype={INPUT_DTYPE.__name__}")
 except Exception as e:
     interpreter = None
-    print(f"[!] Error loading model utama: {e}")
+    # Simpan alasannya: tanpa ini FE cuma dapat "Model klasifikasi tidak ter-load"
+    # dan penyebabnya (file tak ada / TF belum terpasang / OOM) cuma kelihatan di
+    # journalctl. Lihat CameraWorker.start() dan /camera/status.
+    MODEL_LOAD_ERROR = f"{type(e).__name__}: {e}"
+    print(f"[!] Error loading model utama ({_primary_path}): {e}")
 
 # Penjaga B3 = model lama. Dimuat hanya kalau ensemble aktif & utama = model baru.
-if ENSEMBLE and interpreter is not None and _primary_path != MODEL_PATH:
+if ENSEMBLE and interpreter is not None and _primary_path != (_find_model(MODEL_PATH) or MODEL_PATH):
     try:
-        guard_interp, guard_in, guard_out = _load_tflite(MODEL_PATH)
+        guard_interp, guard_in, guard_out = _load_tflite(_find_model(MODEL_PATH) or MODEL_PATH)
         ENSEMBLE_ACTIVE = True
-        print(f"[+] Penjaga B3 (model lama) loaded: {MODEL_PATH} | override B3 kalau prob B3 >= {B3_GATE*100:.0f}%")
+        print(f"[+] Penjaga B3 loaded: {MODEL_PATH} | mode={ENSEMBLE_MODE}"
+              + (f" (bobot penjaga {GUARD_WEIGHT:.2f})" if ENSEMBLE_MODE == "avg" else "")
+              + f" | override B3 kalau prob B3 >= {B3_GATE*100:.0f}%"
+              + (f", margin >= {B3_MARGIN*100:.0f}%" if B3_MARGIN > 0 else ", margin MATI")
+              + (f", utama B3 >= {B3_PRIMARY_FLOOR*100:.0f}%" if B3_PRIMARY_FLOOR > 0 else ", veto MATI"))
     except Exception as e:
         print(f"[!] Gagal load penjaga B3 '{MODEL_PATH}': {e} → ensemble nonaktif, pakai model utama saja.")
 
@@ -545,6 +654,27 @@ def _run(interp, ins, outs, inp):
     return preds.astype(np.float32)
 
 
+def _b3_should_override(g_preds, p_preds):
+    """Putusin apakah hasil dipaksa jadi B3. Tiga syarat, semua harus lolos:
+      (a) prob B3 guard >= B3_GATE
+      (b) B3 guard menang >= B3_MARGIN dari kelas kedua-tertingginya
+      (c) prob B3 model utama >= B3_PRIMARY_FLOOR  (veto: butuh suara kedua)
+    Return (lolos, prob_b3_guard, daftar_alasan_gagal)."""
+    g_b3 = float(g_preds[_B3_IDX])
+    lain = [float(v) for i, v in enumerate(g_preds) if i != _B3_IDX]
+    kedua = max(lain) if lain else 0.0
+    p_b3 = float(p_preds[_B3_IDX])
+
+    gagal = []
+    if g_b3 < B3_GATE:
+        gagal.append(f"guard B3 {g_b3*100:.0f}% < gate {B3_GATE*100:.0f}%")
+    if B3_MARGIN > 0 and g_b3 - kedua < B3_MARGIN:
+        gagal.append(f"margin {(g_b3 - kedua)*100:.0f}% < {B3_MARGIN*100:.0f}%")
+    if B3_PRIMARY_FLOOR > 0 and p_b3 < B3_PRIMARY_FLOOR:
+        gagal.append(f"utama B3 {p_b3*100:.0f}% < floor {B3_PRIMARY_FLOOR*100:.0f}% (VETO)")
+    return (not gagal), g_b3, gagal
+
+
 def _predict_vote(images):
     """Voting antar-frame: rata-ratain vektor probabilitas beberapa frame → 1
     keputusan. Lebih stabil daripada 1 frame (ngurangin loncat organik<->anorganik
@@ -555,25 +685,50 @@ def _predict_vote(images):
         return None, 0.0
 
     acc = None            # jumlah probabilitas model utama
-    g_b3_acc = 0.0        # jumlah prob B3 dari penjaga (model lama)
+    g_acc = None          # jumlah probabilitas PENUH penjaga (margin butuh semua kelas)
     n = 0
     for image in imgs:
         inp   = _preprocess(image)
         preds = _run(interpreter, input_details, output_details, inp)
         acc   = preds if acc is None else acc + preds
         if ENSEMBLE_ACTIVE:
-            g_b3_acc += float(_run(guard_interp, guard_in, guard_out, inp)[_B3_IDX])
+            g     = _run(guard_interp, guard_in, guard_out, inp)
+            g_acc = g if g_acc is None else g_acc + g
         n += 1
 
     preds = acc / n                       # rata-rata probabilitas
     idx   = int(np.argmax(preds))
     label, conf = CLASS_NAMES[idx], float(preds[idx])
 
-    # Ensemble: model lama sbg penjaga B3. Pakai rata-rata prob B3 juga biar konsisten.
+    # Gabungkan pendapat kedua model dulu (kalau modenya bukan "guard"), baru
+    # gerbang B3 dijalankan di atas hasil gabungan itu.
+    if ENSEMBLE_ACTIVE and ENSEMBLE_MODE in ("avg", "confident"):
+        g_avg = g_acc / n
+        if ENSEMBLE_MODE == "avg":
+            w = max(0.0, min(1.0, GUARD_WEIGHT))
+            gabung = preds * (1.0 - w) + g_avg * w
+            asal = f"avg(w={w:.2f})"
+        else:
+            pakai_guard = float(g_avg.max()) > float(preds.max())
+            gabung = g_avg if pakai_guard else preds
+            asal = "penjaga" if pakai_guard else "utama"
+        i2 = int(np.argmax(gabung))
+        print(f"[ENS] {ENSEMBLE_MODE} → {CLASS_NAMES[i2]} {gabung[i2]*100:.0f}% via {asal} "
+              f"[utama {label} {conf*100:.0f}% | penjaga {CLASS_NAMES[int(np.argmax(g_avg))]} "
+              f"{float(g_avg.max())*100:.0f}%]")
+        preds, idx = gabung, i2
+        label, conf = CLASS_NAMES[idx], float(preds[idx])
+
+    # Ensemble: penjaga B3 boleh maksa hasil jadi B3, tapi harus lolos gate +
+    # margin + veto model utama. Rata-rata antar-frame dipakai di dua-duanya.
     if ENSEMBLE_ACTIVE:
-        g_b3 = g_b3_acc / n
-        if g_b3 >= B3_GATE:
+        ok, g_b3, gagal = _b3_should_override(g_acc / n, preds)
+        if ok:
+            print(f"[ENS] gerbang B3 → guard B3={g_b3*100:.0f}% "
+                  f"(utama bilang {label} {conf*100:.0f}%)")
             return "B3", g_b3
+        print(f"[ENS] ikut utama → {label} {conf*100:.0f}%  "
+              f"[guard B3={g_b3*100:.0f}% ditolak: " + "; ".join(gagal) + "]")
     return label, conf
 
 
@@ -620,20 +775,81 @@ DATASET_LABEL   = os.environ.get("DATASET_LABEL", "unsorted")
 CAMERA_WARMUP_SEC = float(os.environ.get("CAMERA_WARMUP_SEC", "2.0"))  # tunggu kamera settle (auto-exposure) sebelum ambil baseline → cegah false-trigger di awal
 IDLE_LOG_SEC = float(os.environ.get("IDLE_LOG_SEC", "15"))  # interval log "menunggu objek" saat platform kosong (biar keliatan hidup, tak spam)
 ROI_FRAC    = float(os.environ.get("ROI_FRAC", "0.6"))    # fraksi tengah frame (area buletan) yg dipantau+diklasifikasi
-OBJECT_DIFF = float(os.environ.get("OBJECT_DIFF", "18"))  # beda dari kosong utk dianggap ADA objek (naikin kalau sering false)
-CLEAR_DIFF  = float(os.environ.get("CLEAR_DIFF", "9"))    # beda di bawah ini = platform kosong lagi → re-arm
-STILL_MOVE  = float(os.environ.get("STILL_MOVE", "4"))    # gerak antar-frame di bawah ini = objek sudah diam
+# Input model = crop ROI, BUKAN frame penuh. Di rig Pi frame penuh didominasi
+# platform MERAH + bodi HIJAU, objeknya cuma sebagian kecil — model jadi mutusin
+# berdasarkan warna alas, bukan sampahnya (daun ke-vote Anorganik 96%/B3 73%).
+# Di sim laptop objek dipegang & memenuhi frame, makanya di sana kelihatan benar.
+# CLASSIFY_ROI=0 buat balik ke perilaku lama (frame penuh).
+CLASSIFY_ROI = os.environ.get("CLASSIFY_ROI", "1") not in ("0", "false", "False", "")
+# Geser titik pusat ROI kalau kamera tidak pas lurus di atas buletan. Fraksi dari
+# LEBAR/TINGGI frame, + = kanan/bawah. Cara nyari nilainya: buka feed kamera di
+# dashboard, lihat kotak "area deteksi" — kalau buletan melenceng ke kanan 12%
+# lebar frame, set ROI_DX=0.12. Default 0 = persis tengah (perilaku lama).
+ROI_DX      = float(os.environ.get("ROI_DX", "0.0"))
+ROI_DY      = float(os.environ.get("ROI_DY", "0.0"))
+# Bandingkan WARNA (BGR, ambil selisih kanal terbesar), bukan grayscale. Alas merah
+# terang dan daun gelap kehijauan punya luminansi nyaris sama (158.4 vs 156.6) —
+# di grayscale daunnya tak terlihat sama sekali, padahal beda 39 di kanal merah.
+# DIFF_COLOR=0 balik ke grayscale (perilaku lama, lebih hemat CPU sedikit).
+DIFF_COLOR = os.environ.get("DIFF_COLOR", "1") not in ("0", "false", "False", "")
+# Metrik warna nilainya ~1.75x grayscale (diukur dari frame rig). Ambang lama
+# dikalibrasi buat grayscale, jadi kalau dipakai apa adanya: OBJECT_DIFF jadi
+# kelewat gampang (false trigger) DAN CLEAR_DIFF jadi kelewat ketat — platform
+# kosong tak pernah dianggap kosong, sistem tak pernah re-arm setelah aktuasi.
+# Default di bawah ikut skala; override lewat env tetap dipakai apa adanya.
+_DSKALA = 1.75 if DIFF_COLOR else 1.0
+OBJECT_DIFF = float(os.environ.get("OBJECT_DIFF", 18 * _DSKALA))  # beda dari kosong utk dianggap ADA objek
+# obj_diff (rata-rata beda piksel) SENDIRIAN gampang ketipu: cahaya ruangan geser
+# atau auto-exposure kamera nyetel ulang bikin SELURUH ROI berubah tipis, rata-rata
+# naik lewat OBJECT_DIFF padahal buletan kosong → deteksi hantu. Objek beneran beda:
+# dia bikin sebagian piksel berubah TAJAM, bukan semua piksel berubah dikit.
+OBJECT_PIXEL_DELTA = float(os.environ.get("OBJECT_PIXEL_DELTA", "30"))  # beda per-piksel yg dihitung "berubah tajam"
+OBJECT_AREA_MIN    = float(os.environ.get("OBJECT_AREA_MIN", "0.04"))   # min fraksi ROI yg berubah tajam (0.04 = 4%)
+# Baseline ikut hanyut pelan selama platform kosong, biar drift cahaya sepanjang
+# hari tidak numpuk jadi false-trigger. 0 = matikan (baseline beku, perilaku lama).
+BASELINE_ALPHA     = float(os.environ.get("BASELINE_ALPHA", "0.02"))
+CLEAR_DIFF  = float(os.environ.get("CLEAR_DIFF", 9 * _DSKALA))   # beda di bawah ini = platform kosong lagi
+STILL_MOVE  = float(os.environ.get("STILL_MOVE", 4 * _DSKALA))   # gerak antar-frame di bawah ini = objek diam
+# Syarat UTAMA "platform sudah kosong" buat re-arm: fraksi piksel yang berubah tajam.
+# Pakai AREA, bukan rata-rata: platform ini berputar, jadi setelah aktuasi lubang
+# baut & goresan berhenti di posisi lain — tampilannya tak pernah balik PERSIS ke
+# baseline lama walau buletannya benar-benar kosong. Perbedaan kecil tersebar itu
+# ngangkat obj_diff tapi hampir tak nambah AREA. Objek nyata bikin blob besar.
+CLEAR_AREA  = float(os.environ.get("CLEAR_AREA", "0.02"))        # < 2% area berubah = kosong
 STILL_NEED  = int(os.environ.get("STILL_NEED", "3"))      # butuh N frame diam berturut sebelum jepret
 REARM_BUFFER = float(os.environ.get("REARM_BUFFER", "1.5"))  # jeda ekstra setelah aktuator selesai sebelum siap objek baru
+REARM_STILL_NEED = int(os.environ.get("REARM_STILL_NEED", "8"))  # frame DIAM berturut yg wajib sebelum baseline baru diambil
+# Batas nunggu platform balik kosong sebelum baseline DIPAKSA diperbarui. Ini katup
+# pengaman biar tidak deadlock kalau kamera kesenggol / cahaya berubah drastis —
+# TAPI kalau yang bikin beda itu objek yang masih nangkring, objek tsb ikut ke-serap
+# jadi "kondisi kosong" dan tidak akan terdeteksi lagi. Makanya sengaja lama, dan
+# selama nunggu tetap ngeluarin peringatan. 0 = nunggu selamanya (tidak pernah dipaksa).
+REARM_MAX_WAIT   = float(os.environ.get("REARM_MAX_WAIT", "60"))
+REARM_WARN_SEC   = float(os.environ.get("REARM_WARN_SEC", "10"))  # interval peringatan saat nunggu
+# Fase GRACE setelah mekanik berhenti, sebelum sistem benar-benar armed. Diamati di
+# rig: baseline diambil saat scene sudah diam, lalu alas masih bergeser sedikit ke
+# posisi istirahat final dan BERHENTI STABIL di situ. Scene diam (lolos STILL_NEED
+# berapa pun) tapi beda jauh dari baseline → jepret platform kosong. Tidak ada
+# ambang yang bisa menangkal ini karena masalahnya KAPAN baseline diambil.
+# Selama grace, baseline terus disamakan dengan frame sekarang supaya pergeseran
+# sisa terserap. Objek yang ditaruh saat grace TIDAK ikut terserap: penyegaran
+# baseline berhenti begitu perubahannya sebesar objek (>= CLEAR_AREA).
+REARM_GRACE_SEC  = float(os.environ.get("REARM_GRACE_SEC", "2.0"))
 
 
-def _center_roi(frame, frac):
-    """Crop kotak tengah frame (area platform/buletan). frac=0.6 → 60% tengah."""
+def _center_roi(frame, frac, dx=None, dy=None):
+    """Crop kotak ROI (area platform/buletan). frac=0.6 → sisi 60% dari sisi
+    terpendek frame. dx/dy menggeser PUSAT crop (fraksi lebar/tinggi frame,
+    + = kanan/bawah) buat kamera yang tidak lurus di atas buletan; kalau None
+    pakai ROI_DX/ROI_DY. Kotak selalu dijaga tetap di dalam frame."""
     h, w = frame.shape[:2]
     s = int(min(h, w) * max(0.1, min(1.0, frac)))
-    cy, cx = h // 2, w // 2
-    y0 = max(0, cy - s // 2)
-    x0 = max(0, cx - s // 2)
+    dx = ROI_DX if dx is None else dx
+    dy = ROI_DY if dy is None else dy
+    x0 = int(w / 2 + dx * w) - s // 2
+    y0 = int(h / 2 + dy * h) - s // 2
+    x0 = max(0, min(w - s, x0))   # clamp: jangan keluar frame
+    y0 = max(0, min(h - s, y0))
     return frame[y0:y0 + s, x0:x0 + s]
 
 # Mode OBJEK (motion-gate 1x): pas objek masuk → jepret+analisis SEKALI, lalu tunggu
@@ -676,6 +892,9 @@ class CameraWorker:
         self.last    = {"kategori": None, "confidence": None, "ts": None}
         self.last_raw = None   # frame BGR terakhir (buat push monitor ke dashboard)
         self.error   = None
+        # Kondisi detektor SAAT INI — dibaca /camera/status. Tanpa ini satu-satunya
+        # cara tau kenapa objek tak ke-trigger adalah baca journalctl di Pi.
+        self.debug   = {}
 
     def start(self):
         if not _HAS_CV2:
@@ -683,7 +902,9 @@ class CameraWorker:
             print(f"[CAM] {self.error}")
             return False
         if interpreter is None:
-            self.error = "Model klasifikasi tidak ter-load"
+            self.error = ("Model klasifikasi tidak ter-load"
+                          + (f" — {MODEL_LOAD_ERROR}" if MODEL_LOAD_ERROR else "")
+                          + f" (MODEL_PATH={MODEL_PATH}, ENSEMBLE={'1' if ENSEMBLE else '0'})")
             print(f"[CAM] {self.error}")
             return False
         if self.running:
@@ -717,6 +938,9 @@ class CameraWorker:
         prev_roi = None       # ROI frame sebelumnya (deteksi gerak)
         armed = True
         still = 0
+        settle = 0            # frame diam berturut saat nunggu mekanik berhenti (re-arm)
+        warn_at = 0.0         # waktu peringatan "platform belum kosong" berikutnya
+        grace_until = 0.0     # akhir fase grace (baseline masih dilaraskan, belum armed)
         rearm_at = 0.0        # waktu boleh re-arm (setelah aktuator selesai)
         warmup_until = time.time() + CAMERA_WARMUP_SEC  # settle auto-exposure dulu
         n_obj = 0             # nomor urut objek yang sudah diproses
@@ -741,26 +965,61 @@ class CameraWorker:
                 continue
 
             roi = _center_roi(frame, ROI_FRAC)
-            gray = cv2.GaussianBlur(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY), (21, 21), 0)
+            # vis = citra yang dipakai buat DETEKSI (bukan input model). Berwarna
+            # kalau DIFF_COLOR, kalau tidak grayscale seperti versi lama.
+            vis = cv2.GaussianBlur(roi if DIFF_COLOR
+                                   else cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY), (21, 21), 0)
 
             if baseline is None:
-                baseline = gray       # anggap platform kosong saat start
-                prev_roi = gray
+                baseline = vis.astype(np.float32)   # anggap platform kosong saat start
+                prev_roi = vis
                 idle_log_at = time.time() + IDLE_LOG_SEC
                 print("[CAM] ✅ Baseline platform KOSONG diambil — SIAP, menunggu objek di buletan...")
                 time.sleep(0.03)
                 continue
 
-            obj_diff = float(cv2.absdiff(gray, baseline).mean())   # beda dari kondisi kosong
-            move     = float(cv2.absdiff(gray, prev_roi).mean())    # gerak antar-frame
-            prev_roi = gray
+            grayf = vis.astype(np.float32)
+            # Selisih per-piksel = kanal yang paling beda (bukan rata-rata kanal):
+            # objek yang cuma beda di satu kanal — persis kasus daun vs alas merah —
+            # tetap kebaca penuh, tidak ke-encerin kanal lain yang kebetulan mirip.
+            _d = cv2.absdiff(grayf, baseline)
+            diff_map = _d.max(axis=2) if _d.ndim == 3 else _d       # beda dari kondisi kosong
+            obj_diff = float(diff_map.mean())                       # rata-rata (kena drift cahaya)
+            obj_area = float((diff_map > OBJECT_PIXEL_DELTA).mean())  # fraksi piksel berubah TAJAM
+            _m = cv2.absdiff(vis, prev_roi)
+            move     = float((_m.max(axis=2) if _m.ndim == 3 else _m).mean())  # gerak antar-frame
+            prev_roi = vis
+
+            self.debug = {
+                "armed": armed,                       # False = lagi nunggu platform kosong
+                "obj_diff": round(obj_diff, 1),       # vs ambang OBJECT_DIFF
+                "obj_area_pct": round(obj_area * 100, 2),   # vs OBJECT_AREA_MIN / CLEAR_AREA
+                "move": round(move, 1),               # vs STILL_MOVE
+                "still": still,                       # butuh STILL_NEED buat jepret
+                "settle": settle,                     # butuh REARM_STILL_NEED buat re-arm
+                "detik_nunggu_rearm": (round(time.time() - rearm_at, 1)
+                                       if not armed and rearm_at else None),
+                "objek_ke": n_obj,
+                # Kesimpulan siap-pakai: kenapa frame ini tidak nge-trigger.
+                "kenapa": (
+                    "lagi nunggu platform kosong (armed=False)" if not armed else
+                    f"obj_diff {obj_diff:.1f} <= OBJECT_DIFF {OBJECT_DIFF:.1f}"
+                    if obj_diff <= OBJECT_DIFF else
+                    f"area {obj_area*100:.2f}% <= OBJECT_AREA_MIN {OBJECT_AREA_MIN*100:.1f}%"
+                    if obj_area <= OBJECT_AREA_MIN else
+                    f"masih gerak: move {move:.1f} >= STILL_MOVE {STILL_MOVE:.1f}"
+                    if move >= STILL_MOVE else
+                    f"nunggu diam: still {still}/{STILL_NEED}"
+                ),
+            }
 
             if armed:
                 # Objek nutupin platform (beda dari kosong) DAN sudah diam beberapa frame.
-                if obj_diff > OBJECT_DIFF and move < STILL_MOVE:
+                if obj_diff > OBJECT_DIFF and obj_area > OBJECT_AREA_MIN and move < STILL_MOVE:
                     if not detecting:
                         detecting = True
-                        print(f"[CAM] 👀 Objek MASUK buletan (obj_diff={obj_diff:.0f} > {OBJECT_DIFF:.0f}) — tunggu diam...")
+                        print(f"[CAM] 👀 Objek MASUK buletan (obj_diff={obj_diff:.0f} > {OBJECT_DIFF:.0f}, "
+                              f"area={obj_area*100:.1f}% > {OBJECT_AREA_MIN*100:.1f}%) — tunggu diam...")
                     still += 1
                     if still >= STILL_NEED:
                         detecting = False
@@ -788,20 +1047,24 @@ class CameraWorker:
                                 print(f"[Dataset] +1 ({DATASET_LABEL}) → {fn}")
                             except Exception as e:
                                 print(f"[Dataset] gagal simpan: {e}")
-                        # Klasifikasi FRAME PENUH (bukan crop ROI) — model lebih akurat
-                        # dgn framing penuh, sama seperti sim browser. ROI cuma dipakai
-                        # untuk DETEKSI kapan ada objek di platform, bukan input model.
-                        img = Image.fromarray(cv2.cvtColor(shot, cv2.COLOR_BGR2RGB))
+                        # Input model = crop ROI (area buletan), biar warna platform
+                        # merah/hijau di pinggir tidak ikut menentukan kelas. Samain
+                        # dengan sim_platform.py --live yang selama ini hasilnya benar.
+                        def _siap(fr):
+                            src = _center_roi(fr, ROI_FRAC) if CLASSIFY_ROI else fr
+                            return Image.fromarray(cv2.cvtColor(src, cv2.COLOR_BGR2RGB))
+
+                        img = _siap(shot)
                         try:
-                            vote_imgs = [Image.fromarray(cv2.cvtColor(s, cv2.COLOR_BGR2RGB))
-                                         for s in vote_shots] or [img]
+                            vote_imgs = [_siap(s) for s in vote_shots] or [img]
                             kategori, conf = _predict_vote(vote_imgs)
                         except Exception as e:
                             print(f"[CAM] gagal klasifikasi: {e}")
                             kategori, conf = None, 0.0
 
                         n_obj += 1
-                        if kategori and conf >= CONF_THRESHOLD:
+                        teraktuasi = bool(kategori) and conf >= CONF_THRESHOLD
+                        if teraktuasi:
                             print(f"[CAM] #{n_obj} ✓ {kategori} ({conf:.0%}) → aktuasi STM32 + lapor backend")
                             kirim_ke_stm32(kategori)
                             report_classification(kategori, conf)
@@ -809,33 +1072,95 @@ class CameraWorker:
                         else:
                             print(f"[CAM] #{n_obj} objek di platform, confidence rendah ({conf:.0%}) — dilewati")
 
-                        armed = False    # tunggu aktuator selesai jatuhin objek
+                        armed = False
                         still = 0
-                        # Re-arm setelah aktuator kelar (objek jatuh & platform reset).
-                        wait_s = _actuator_lock_sec(kategori) + REARM_BUFFER
+                        if teraktuasi:
+                            # Aktuator jalan → objek mestinya jatuh & mekanik reset.
+                            wait_s = _actuator_lock_sec(kategori) + REARM_BUFFER
+                            print(f"[CAM] ⏳ tunggu aktuator ~{wait_s:.1f}s (objek jatuh + mekanik reset)...")
+                        else:
+                            # TIDAK ada aktuasi → objek MASIH di platform. Jangan pakai
+                            # timer aktuator (tidak ada yang jalan); cukup jeda pendek,
+                            # lalu syarat CLEAR_DIFF di bawah yang nunggu objek diangkat.
+                            wait_s = COOLDOWN_SEC
+                            print(f"[CAM] ⏳ tidak diaktuasi — objek masih di platform, "
+                                  f"angkat dulu (cek lagi tiap {wait_s:.1f}s)...")
                         rearm_at = time.time() + wait_s
-                        print(f"[CAM] ⏳ tunggu aktuator ~{wait_s:.1f}s (objek jatuh + mekanik reset)...")
                 else:
                     if detecting:
                         # objek keburu pindah/goyang sebelum diam → batal, tunggu lagi
                         detecting = False
-                        print(f"[CAM] objek belum diam / pindah (obj_diff={obj_diff:.0f}) — tunggu lagi...")
+                        print(f"[CAM] objek belum diam / pindah (obj_diff={obj_diff:.0f}, area={obj_area*100:.1f}%) — tunggu lagi...")
                     still = 0
+                    # Platform kosong & tenang → geser baseline pelan ngikutin cahaya
+                    # sekarang. Ini yang bikin drift lampu/auto-exposure tidak numpuk.
+                    if BASELINE_ALPHA > 0 and obj_area < CLEAR_AREA:
+                        cv2.accumulateWeighted(grayf, baseline, BASELINE_ALPHA)
                     # Heartbeat: platform kosong & siap. Log tiap IDLE_LOG_SEC biar
                     # keliatan sistem hidup tanpa spam tiap frame.
                     if time.time() >= idle_log_at:
-                        print(f"[CAM] … menunggu objek (platform kosong, obj_diff={obj_diff:.0f})")
+                        print(f"[CAM] … menunggu objek (platform kosong, obj_diff={obj_diff:.0f}, area={obj_area*100:.1f}%)")
                         idle_log_at = time.time() + IDLE_LOG_SEC
             else:
-                # Re-arm berbasis WAKTU: setelah aktuator selesai, anggap objek sudah
-                # jatuh & platform reset → siap objek baru + perbarui baseline ke kondisi
-                # platform SEKARANG (kosong, walau posisi sedikit bergeser). Lebih robust
-                # daripada nunggu tampilan balik PERSIS ke baseline lama.
-                if time.time() >= rearm_at:
-                    armed = True
-                    baseline = gray
-                    idle_log_at = time.time() + IDLE_LOG_SEC
-                    print(f"[CAM] ✅ Platform kosong lagi — SIAP objek berikutnya (#{n_obj + 1}).")
+                # Re-arm: timer aktuator habis SAJA tidak cukup. Durasi ACTUATOR_TIMES
+                # cuma perkiraan — mekanik (tilt/servo/auto-reset) bisa MASIH gerak pas
+                # timer bunyi. Kalau baseline diambil saat itu, isinya "platform miring /
+                # objek nyangkut"; begitu platform balik ke posisi rest, obj_diff vs
+                # baseline jelek itu meledak > OBJECT_DIFF padahal buletan KOSONG →
+                # false-trigger → yang diklasifikasi PLATFORM KOSONG, dan platform kosong
+                # selalu jatuh ke kelas yang sama tiap siklus.
+                # Makanya: tunggu scene benar-benar DIAM dulu, baru ambil baseline.
+                if grace_until:
+                    # Laraskan baseline ke kondisi sekarang selama grace — kecuali
+                    # perubahannya sebesar objek, yang berarti ada yang ditaruh dan
+                    # tidak boleh ikut jadi "kondisi kosong".
+                    if obj_area < CLEAR_AREA:
+                        baseline = grayf.copy()
+                    if time.time() >= grace_until:
+                        grace_until = 0.0
+                        armed = True
+                        settle = 0
+                        warn_at = 0.0
+                        idle_log_at = time.time() + IDLE_LOG_SEC
+                        print(f"[CAM] ✅ SIAP objek berikutnya (#{n_obj + 1}) — grace "
+                              f"{REARM_GRACE_SEC:.1f}s selesai, obj_diff={obj_diff:.0f}.")
+                elif time.time() >= rearm_at:
+                    # "Diam" saja tidak cukup — mekanik bisa berhenti sesaat di tengah
+                    # jalan (mis. puncak tilt) dan itu lolos syarat diam dalam 0,3 dtk.
+                    # Wajib juga MIRIP kondisi kosong yang lama (obj_diff < CLEAR_DIFF),
+                    # jadi baseline tidak pernah keambil pas platform masih miring.
+                    diam  = move < STILL_MOVE
+                    # CUKUP SALAH SATU sinyal bilang bersih. Diukur dari rig: habis
+                    # aktuasi buletan kosong tapi alas berhenti di rotasi lain →
+                    # area 7-8% (lubang baut pindah) padahal obj_diff cuma 8-15.
+                    # Objek yang benar-benar nangkring: area 54%, obj_diff 50.
+                    # Pakai AND bikin kasus pertama tak pernah lolos → nunggu 60s
+                    # tiap siklus, dan objek yang ditaruh selama itu terabaikan.
+                    pulih = obj_area < CLEAR_AREA or obj_diff < CLEAR_DIFF
+                    settle = settle + 1 if (diam and pulih) else 0
+                    telat = REARM_MAX_WAIT > 0 and time.time() >= rearm_at + REARM_MAX_WAIT
+                    if not pulih and time.time() >= warn_at:
+                        # Kasih tau SELAMA nunggu, bukan cuma pas nyerah — biar kelihatan
+                        # bedanya "lagi nunggu diangkat" vs "sistem nge-hang".
+                        print(f"[CAM] ⏸ platform belum kosong (area={obj_area*100:.1f}% > "
+                              f"{CLEAR_AREA*100:.1f}% DAN obj_diff={obj_diff:.0f} >= "
+                              f"{CLEAR_DIFF:.0f}) — angkat objeknya biar siap lagi.")
+                        warn_at = time.time() + REARM_WARN_SEC
+                    if settle >= REARM_STILL_NEED or (telat and diam):
+                        if settle < REARM_STILL_NEED:
+                            # Katup pengaman. Efek sampingnya nyata: apa pun yang masih
+                            # ada di platform sekarang jadi bagian dari "kosong".
+                            print(f"[CAM] ⚠️ {REARM_MAX_WAIT:.0f}s platform tak balik ke kondisi kosong "
+                                  f"(area={obj_area*100:.1f}% > {CLEAR_AREA*100:.1f}%) — baseline DIPAKSA "
+                                  f"diperbarui. Kalau ada objek yang masih nangkring, mulai sekarang "
+                                  f"dia dianggap bagian dari platform & tak akan terdeteksi. "
+                                  f"Cek objek nyangkut / kamera bergeser.")
+                        settle = 0
+                        warn_at = 0.0
+                        baseline = grayf.copy()
+                        grace_until = time.time() + REARM_GRACE_SEC
+                        print(f"[CAM] platform diam & kosong (obj_diff={obj_diff:.0f}) — "
+                              f"grace {REARM_GRACE_SEC:.1f}s biar mekanik benar-benar mapan...")
 
             time.sleep(0.03)  # ~30fps buat feed, hemat CPU
 
@@ -1051,6 +1376,18 @@ def camera_status():
         "running": camera_worker.running,
         "has_opencv": _HAS_CV2,
         "camera_index": CAMERA_INDEX,
+        "roi": {"frac": ROI_FRAC, "dx": ROI_DX, "dy": ROI_DY, "classify_roi": CLASSIFY_ROI},
+        "trigger": {"diff_color": DIFF_COLOR,
+                    "obj_diff": OBJECT_DIFF, "pixel_delta": OBJECT_PIXEL_DELTA,
+                    "area_min": OBJECT_AREA_MIN, "baseline_alpha": BASELINE_ALPHA,
+                    "clear_diff": CLEAR_DIFF, "clear_area": CLEAR_AREA,
+                    "still_move": STILL_MOVE, "rearm_still_need": REARM_STILL_NEED,
+                    "rearm_max_wait": REARM_MAX_WAIT, "rearm_grace_sec": REARM_GRACE_SEC},
+        "detektor": camera_worker.debug,   # kondisi live: kenapa trigger / tidak
+        "model_error": MODEL_LOAD_ERROR,
+        "ensemble": {"aktif": ENSEMBLE_ACTIVE, "mode": ENSEMBLE_MODE,
+                     "utama": _primary_path, "penjaga": MODEL_PATH,
+                     "guard_weight": GUARD_WEIGHT},
         "conf_threshold": CONF_THRESHOLD,
         "motion_threshold": MOTION_THRESHOLD,
         "cooldown_sec": COOLDOWN_SEC,           # jeda saat tak ada aktuasi
