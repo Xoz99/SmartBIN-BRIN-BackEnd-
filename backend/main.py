@@ -13,7 +13,7 @@ from PIL import Image
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from google import genai
 import paho.mqtt.client as mqtt_client
@@ -95,14 +95,13 @@ GUARD_WEIGHT  = float(os.getenv("GUARD_WEIGHT", "0.5"))   # bobot penjaga di mod
 VOTE_FRAMES    = max(1, int(os.getenv("VOTE_FRAMES", "5")))
 VOTE_DELAY     = float(os.getenv("VOTE_DELAY", "0.03"))   # jeda antar-frame (detik)
 
-# --- SERIAL PORTS ---
-# AUTO-DETEKSI STM32 vs LoRa dari deskripsi/VID USB (biar tidak ketuker saat nomor
-# ttyACM* geser tiap reboot — penyebab "perintah aktuator nyasar ke LoRa").
-#   STM32   = STMicroelectronics / Virtual COM / VID 0483
-#   LoRa32  = CH340 / QinHeng / VID 1a86 (atau CP210x / Silicon Labs)
-# Override paksa lewat env STM32_PORT / LORA_PORT kalau deteksi meleset.
+# --- SERIAL PORT STM32 ---
+# LoRa dibuang 2026-09-03 (modulnya dicabut biar tidak ikut narik daya). Yang
+# tersisa cuma STM32, dideteksi dari deskripsi/VID USB supaya tidak salah port
+# waktu nomor ttyACM* geser tiap reboot.
+#   STM32 = STMicroelectronics / Virtual COM / VID 0483
+# Override paksa lewat env STM32_PORT kalau deteksi meleset.
 STM32_PORT = os.environ.get("STM32_PORT")   # None → auto-detect
-LORA_PORT  = os.environ.get("LORA_PORT")    # None → auto-detect
 BAUD_RATE  = int(os.environ.get("BAUD_RATE", "115200"))
 
 # --- Backend SmartBIN (MQTT HiveMQ Cloud) — set per-node lewat env var. ---
@@ -118,11 +117,8 @@ NODE_ID      = os.environ.get("NODE_ID", "bin-003")
 # Bikin start/stop kamera + baca status + tail log bisa dari luar NAT tanpa VPN.
 remote = RemoteControl(NODE_ID)
 
-# --- Jalur forward yang aktif (bisa dimatiin per-jalur lewat env) ---
-# Default: MQTT + LoRa nyala (perilaku lama). Matikan salah satu saat eksperimen
-# perbandingan biar tidak dobel-tulis ke backend (mis. FORWARD_MQTT=0).
+# --- Jalur forward yang aktif (bisa dimatiin lewat env) ---
 FORWARD_MQTT = os.environ.get("FORWARD_MQTT", "1") == "1"
-FORWARD_LORA = os.environ.get("FORWARD_LORA", "1") == "1"
 
 # Log sensor ringkas: cetak tiap N bacaan (1=tiap bacaan, 5=lebih sepi). Kurangi spam.
 LOG_SENSOR_EVERY = int(os.environ.get("LOG_SENSOR_EVERY", "1"))
@@ -141,10 +137,12 @@ def _sensor_summary(d: dict) -> str:
     except Exception:
         return ""
 
-# --- Jalur perbandingan HTTP (penelitian LoRa vs HTTP) ---
-# COMPARE_HTTP=1 → tiap bacaan STM32 JUGA di-POST langsung ke server (transport=http),
-# selain lewat LoRa (transport=lora, ditandai gateway RX). seq+sentAt disuntik ke tiap
-# bacaan supaya backend bisa hitung packet loss (dari seq) & latency (createdAt−sentAt).
+# --- Jalur HTTP langsung ke server (opsional) ---
+# COMPARE_HTTP=1 → tiap bacaan STM32 JUGA di-POST langsung ke server
+# (transport=http), selain lewat MQTT. seq+sentAt disuntik ke tiap bacaan supaya
+# backend bisa hitung packet loss (dari seq) & latency (createdAt−sentAt).
+# Dulu jalur ini dipakai buat membandingkan LoRa vs HTTP; LoRa sudah dicabut
+# 2026-09-03, jadi sekarang tinggal jalur pembanding MQTT.
 COMPARE_HTTP      = os.environ.get("COMPARE_HTTP", "0") == "1"
 BACKEND_HTTP_URL  = os.environ.get("BACKEND_HTTP_URL", "http://192.168.1.23:3000").rstrip("/")
 DEVICE_INGEST_KEY = os.environ.get("DEVICE_INGEST_KEY", "")
@@ -161,7 +159,6 @@ TOPIC_CLASSIFICATION = f"smartbin/{NODE_ID}/classification"  # <- lapor hasil pe
 # GLOBAL STATE
 # ========================================================
 arduino        = None   # koneksi serial ke STM32
-lora_tx        = None   # koneksi serial ke LoRa
 latest_sensor  = {}
 sensor_lock    = threading.Lock()
 mqtt_connected = False
@@ -169,72 +166,148 @@ _mqtt_client   = None
 _is_running    = False
 _dispatcher_thread = None
 _seq_counter   = 0      # nomor urut paket (buat deteksi packet loss di backend)
+_stm32_port    = None   # path port STM32 yang dipakai (buat watchdog buka ulang)
+_t_serial_ok   = 0.0    # kapan port STM32 terakhir dibuka (patokan umur data)
+_wd_resets     = 0      # berapa kali watchdog sudah reset serial
+_wd_last_reset = 0.0    # kapan terakhir reset (epoch)
 _http_q        = None   # antrean POST jalur HTTP (queue.Queue) — non-blocking
 _http_session  = None   # requests.Session buat jalur HTTP
 
 # ========================================================
 # INIT SERIAL — SEKALI SAJA, DI SATU TEMPAT
 # ========================================================
-def _detect_ports():
-    """Deteksi port STM32 & LoRa dari deskripsi/VID USB. Balikin (stm32, lora).
-    STM32 = STMicroelectronics/Virtual COM/VID 0483; LoRa = CH340/QinHeng/VID 1a86."""
-    stm = lora = None
+def _detect_port_stm32():
+    """Cari port STM32 dari deskripsi/VID USB (STMicroelectronics / VID 0483)."""
     for p in serial.tools.list_ports.comports():
         blob = f"{p.description} {p.manufacturer or ''} {getattr(p, 'product', '') or ''} {p.hwid or ''}".lower()
         if any(k in blob for k in ("stmicro", "stm32", "virtual com", "0483")):
-            stm = stm or p.device
-        elif any(k in blob for k in ("ch340", "ch910", "qinheng", "1a86", "wch", "cp210", "silicon labs")):
-            lora = lora or p.device
-    return stm, lora
+            return p.device
+    return None
 
 
 def init_all_serial():
     """
-    Buka koneksi serial STM32 dan LoRa satu kali di awal startup.
-    Port ditentukan berjenjang: env (STM32_PORT/LORA_PORT) > auto-deteksi USB >
-    default ttyACM. Auto-deteksi mencegah port ketuker saat ttyACM* geser.
+    Buka koneksi serial STM32 satu kali di awal startup.
+    Port ditentukan berjenjang: env STM32_PORT > auto-deteksi USB > /dev/ttyACM0.
+    Auto-deteksi mencegah salah port waktu nomor ttyACM* geser tiap reboot.
     """
-    global arduino, lora_tx
+    global arduino, _stm32_port, _t_serial_ok
 
-    auto_stm, auto_lora = _detect_ports()
-    stm_port  = STM32_PORT or auto_stm or "/dev/ttyACM1"
-    lora_port = LORA_PORT  or auto_lora or "/dev/ttyACM0"
-    print(f"[Serial] Deteksi USB → STM32={auto_stm or '-'} LoRa={auto_lora or '-'} | "
-          f"dipakai: STM32={stm_port}, LoRa={lora_port}")
-
-    if stm_port == lora_port:
-        print(f"[!] PERINGATAN: STM32 & LoRa sama-sama '{stm_port}'. Set env "
-              f"STM32_PORT/LORA_PORT manual. LoRa dilewati, STM32 tetap dicoba.")
+    auto_stm = _detect_port_stm32()
+    stm_port = STM32_PORT or auto_stm or "/dev/ttyACM0"
+    _stm32_port = stm_port   # disimpan supaya watchdog bisa buka ulang port yang sama
+    print(f"[Serial] Deteksi USB → STM32={auto_stm or '-'} | dipakai: {stm_port}")
 
     try:
         arduino = serial.Serial(stm_port, BAUD_RATE, timeout=1)
         time.sleep(2)
+        _t_serial_ok = time.time()
         print(f"[+] STM32 terhubung di {stm_port} @ {BAUD_RATE}")
     except Exception as e:
         arduino = None
         print(f"[!] Gagal buka STM32 di {stm_port}: {e}")
 
-    if lora_port != stm_port:
-        try:
-            lora_tx = serial.Serial(lora_port, BAUD_RATE, timeout=1)
-            time.sleep(2)
-            print(f"[+] LoRa terhubung di {lora_port} @ {BAUD_RATE}")
-        except Exception as e:
-            lora_tx = None
-            print(f"[!] Gagal buka LoRa di {lora_port}: {e}")
-
 
 def close_all_serial():
-    global arduino, lora_tx
+    global arduino
     if arduino is not None and arduino.is_open:
         arduino.close()
         print("[+] Serial STM32 ditutup.")
-    if lora_tx is not None and lora_tx.is_open:
-        lora_tx.close()
-        print("[+] Serial LoRa ditutup.")
 
 # ========================================================
-# SATU DISPATCHER THREAD — baca STM32, forward ke MQTT + LoRa
+# WATCHDOG SERIAL — pulihin STM32 yang hang tanpa dicabut-colok manual
+# ========================================================
+# Masalah nyata 2026-09-02: STM32 berhenti total di tengah jalan. Kamera dan
+# klasifikasi tetap mulus, tapi TIDAK ADA aktuasi sama sekali — dan tidak ada
+# tanda apa pun: /status tetap bilang serial_stm32 "connected", karena itu cuma
+# mengecek port kebuka di level OS. Board yang hang tetap tampil "connected".
+# arduino.write() juga tetap "sukses" (byte cuma masuk buffer OS).
+#
+# Yang membangunkan board waktu itu: MEMBUKA ULANG portnya. Membuka port USB CDC
+# menegaskan DTR, dan itu me-reset STM32 — ketahuan karena tiap kali skrip tes
+# dijalankan (buka port sendiri) mekaniknya langsung nurut lagi.
+#
+# Jadi watchdog ini meniru hal itu: kalau tidak ada satu pun data masuk selama
+# SERIAL_QUIET_SEC, tutup lalu buka lagi portnya. Board reboot, telemetri jalan
+# lagi, pemilahan lanjut — tanpa ada yang perlu menyentuh perangkat.
+#
+# CATATAN JUJUR: ini menambal GEJALA. Penyebab hang-nya ada di firmware STM32
+# yang source-nya tidak ada di repo ini, jadi tidak bisa diperbaiki dari sini.
+SERIAL_WATCHDOG  = os.environ.get("SERIAL_WATCHDOG", "1") not in ("0", "false", "False", "")
+SERIAL_QUIET_SEC = float(os.environ.get("SERIAL_QUIET_SEC", "30"))   # sepi selama ini = dianggap hang
+SERIAL_RESET_GAP = float(os.environ.get("SERIAL_RESET_GAP", "25"))   # jeda minimal antar reset
+
+
+def umur_data_stm32() -> float:
+    """Detik sejak paket TERAKHIR dari STM32, atau inf kalau BELUM PERNAH ada
+    satu paket pun sejak proses ini hidup.
+
+    Sengaja inf, bukan 'dihitung sejak port dibuka'. Port kebuka BUKAN bukti
+    board ngirim data: 2026-09-03 /dev/ttyACM0 muncul normal dan bisa dibuka,
+    tapi firmware-nya diam total (0 baris dalam 45 detik, dan 3 perintah gerak
+    tidak dibalas maupun dieksekusi). Patokan lama bikin gerbang lapor
+    'stm32_siap: true' selama 90 detik pertama padahal board-nya mati."""
+    with sensor_lock:
+        ts = (latest_sensor or {}).get("_timestamp")
+    return float("inf") if ts is None else time.time() - ts
+
+
+def sepi_stm32() -> float:
+    """Khusus watchdog: sama seperti di atas, tapi kalau belum ada paket
+    dihitung sejak port dibuka — biar board dikasih waktu boot dulu, bukan
+    langsung di-reset berulang begitu proses nyala."""
+    with sensor_lock:
+        ts = (latest_sensor or {}).get("_timestamp")
+    return time.time() - (ts or _t_serial_ok)
+
+
+def reset_serial_stm32(alasan: str = "") -> bool:
+    """Tutup lalu buka ulang port STM32 (memicu reset board lewat DTR)."""
+    global arduino, _t_serial_ok, _wd_resets, _wd_last_reset
+    if not _stm32_port:
+        return False
+
+    lama, arduino = arduino, None      # dispatcher berhenti pakai port ini dulu
+    time.sleep(0.3)
+    try:
+        if lama is not None:
+            lama.close()
+    except Exception as e:
+        print(f"[Watchdog] Gagal nutup port (dilanjut): {e}")
+
+    time.sleep(1.0)                    # kasih waktu USB CDC benar-benar lepas
+    try:
+        baru = serial.Serial(_stm32_port, BAUD_RATE, timeout=1)
+        time.sleep(2)                  # board perlu waktu boot setelah DTR reset
+        arduino = baru
+        _t_serial_ok  = time.time()
+        _wd_resets   += 1
+        _wd_last_reset = time.time()
+        print(f"[Watchdog] Serial STM32 dibuka ulang ({alasan}) — reset ke-{_wd_resets}. "
+              f"Board mestinya boot lagi; tunggu telemetri masuk.")
+        return True
+    except Exception as e:
+        print(f"[Watchdog] GAGAL buka ulang {_stm32_port}: {e}")
+        return False
+
+
+def _watchdog_loop():
+    print(f"[Watchdog] Aktif — reset serial kalau sepi > {SERIAL_QUIET_SEC:.0f} detik.")
+    while _is_running:
+        time.sleep(2)
+        if arduino is None:
+            continue
+        umur = sepi_stm32()
+        if umur < SERIAL_QUIET_SEC:
+            continue
+        if time.time() - _wd_last_reset < SERIAL_RESET_GAP:
+            continue               # baru saja reset, kasih kesempatan board boot
+        print(f"[Watchdog] STM32 sepi {umur:.0f} detik — board kemungkinan hang, reset serial...")
+        reset_serial_stm32(f"sepi {umur:.0f}s")
+    print("[Watchdog] Berhenti.")
+
+# ========================================================
+# SATU DISPATCHER THREAD — baca STM32, forward ke MQTT (+ HTTP kalau dinyalain)
 # ========================================================
 def _serial_dispatcher_loop():
     global latest_sensor, _seq_counter
@@ -273,8 +346,7 @@ def _serial_dispatcher_loop():
                 # Metadata penelitian: seq (nomor urut → packet loss) + sentAt (jam
                 # device → latency). STM32 EcoSort SUDAH sertakan seq/sentAt sendiri →
                 # HORMATI punya device (jangan ditimpa). Hanya suntik kalau device
-                # belum kirim (mis. firmware lama). Nilai sama untuk satu bacaan dipakai
-                # jalur LoRa & HTTP → perbandingan per-paket adil.
+                # belum kirim (mis. firmware lama).
                 if "seq" not in data:
                     _seq_counter += 1
                     data["seq"] = _seq_counter
@@ -291,19 +363,12 @@ def _serial_dispatcher_loop():
                 if FORWARD_MQTT and _mqtt_client is not None and mqtt_connected:
                     _mqtt_client.publish(TOPIC_SENSOR, fwd)
 
-                # 3. Forward ke LoRa (→ board RX → gateway tandai transport=lora)
-                if FORWARD_LORA and lora_tx is not None and lora_tx.is_open:
-                    try:
-                        lora_tx.write((fwd + "\n").encode("utf-8"))
-                    except Exception as e:
-                        print(f"[Dispatcher] Gagal kirim ke LoRa: {e}")
-
-                # 4. Forward ke HTTP langsung ke server (transport=http) — non-blocking.
+                # 3. Forward ke HTTP langsung ke server (transport=http) — non-blocking.
                 if COMPARE_HTTP and _http_q is not None:
                     body = {k: v for k, v in data.items() if not str(k).startswith("_")}
                     body["transport"] = "http"
-                    # packetLen = ukuran payload (byte) — sama dgn yang dikirim ke LoRa,
-                    # biar sebanding. Backend pakai ini + latency utk hitung throughput HTTP.
+                    # packetLen = ukuran payload (byte). Backend pakai ini + latency
+                    # buat hitung throughput HTTP.
                     body["packetLen"] = len(fwd.encode("utf-8"))
                     try:
                         _http_q.put_nowait(body)
@@ -325,7 +390,7 @@ def start_dispatcher():
     _dispatcher_thread.start()
 
 # ========================================================
-# JALUR HTTP PERBANDINGAN (opsional — penelitian LoRa vs HTTP)
+# JALUR HTTP LANGSUNG KE SERVER (opsional)
 # ========================================================
 def _http_compare_worker():
     """POST tiap bacaan ke server (transport=http) di thread sendiri, biar loop
@@ -431,8 +496,27 @@ def publish_cmd(cmd: str) -> bool:
 # ========================================================
 ARDUINO_CMD = {"Organik": "organik", "Anorganik": "anorganik", "B3": "B3"}
 
+# Perintah mentah yang dimengerti firmware STM32 (lihat prosesKategori() di .ino).
+# "reset" tidak punya kategori — dia cuma mulangin piringan ke 0 derajat.
+STM32_CMD_VALID = {"organik", "anorganik", "B3", "reset"}
+
+
+def _ke_cmd_stm32(kategori: str):
+    """Terima nama kategori ("Anorganik") maupun perintah mentah ("anorganik").
+
+    Dulu cuma nerima kunci ARDUINO_CMD yang berhuruf besar. Akibatnya endpoint
+    /arduino/ — yang ngirim nilai huruf kecil — SELALU gagal buat organik dan
+    anorganik, lalu diam-diam nyasar ke MQTT dan tetap lapor sukses. Cuma "B3"
+    yang kebetulan lolos karena dia sekaligus kunci dan nilai.
+    """
+    k = (kategori or "").strip()
+    if k in STM32_CMD_VALID:
+        return k
+    return ARDUINO_CMD.get(k) or ARDUINO_CMD.get(k.capitalize())
+
+
 def kirim_ke_stm32(kategori: str) -> dict:
-    cmd = ARDUINO_CMD.get(kategori)
+    cmd = _ke_cmd_stm32(kategori)
     if not cmd:
         return {"ok": False, "channel": None, "reason": f"Kategori '{kategori}' tidak dikenal"}
 
@@ -773,6 +857,14 @@ DATASET_LABEL   = os.environ.get("DATASET_LABEL", "unsorted")
 # kondisi KOSONG (baseline). Cuma analisis kalau ada objek nutupin platform & sudah
 # diam, SEKALI per objek. Nilai = rata-rata beda piksel (0-255). Sesuaikan via env.
 CAMERA_WARMUP_SEC = float(os.environ.get("CAMERA_WARMUP_SEC", "2.0"))  # tunggu kamera settle (auto-exposure) sebelum ambil baseline → cegah false-trigger di awal
+# Gerbang STM32: pemilahan ditahan sampai board terbukti hidup (ada paket masuk).
+# STM32_SIAP_SEC harus DI ATAS siklus kirim alami board. Diukur 2026-09-02:
+# bin-003 mengirim tiap ~33 detik, sangat konsisten (32,7 / 32,8 / 33,0).
+# Angka di bawah 33 bikin board sehat dianggap mati — itu yang sempat terjadi
+# waktu ambang watchdog diset 30 detik dan board yang normal malah di-reset terus.
+TUNGGU_STM32   = os.environ.get("TUNGGU_STM32", "1") not in ("0", "false", "False", "")
+STM32_SIAP_SEC = float(os.environ.get("STM32_SIAP_SEC", "90"))
+
 IDLE_LOG_SEC = float(os.environ.get("IDLE_LOG_SEC", "15"))  # interval log "menunggu objek" saat platform kosong (biar keliatan hidup, tak spam)
 ROI_FRAC    = float(os.environ.get("ROI_FRAC", "0.6"))    # fraksi tengah frame (area buletan) yg dipantau+diklasifikasi
 # Input model = crop ROI, BUKAN frame penuh. Di rig Pi frame penuh didominasi
@@ -891,6 +983,10 @@ class CameraWorker:
         self.cap     = None
         self.last    = {"kategori": None, "confidence": None, "ts": None}
         self.last_raw = None   # frame BGR terakhir (buat push monitor ke dashboard)
+        # ROI + peta selisih terakhir — dipakai /camera/snapshot biar bisa LIHAT
+        # apa yang dianggap "objek", bukan cuma nebak dari angka obj_diff.
+        self.last_roi  = None
+        self.last_diff = None
         self.error   = None
         # Kondisi detektor SAAT INI — dibaca /camera/status. Tanpa ini satu-satunya
         # cara tau kenapa objek tak ke-trigger adalah baca journalctl di Pi.
@@ -986,11 +1082,27 @@ class CameraWorker:
             diff_map = _d.max(axis=2) if _d.ndim == 3 else _d       # beda dari kondisi kosong
             obj_diff = float(diff_map.mean())                       # rata-rata (kena drift cahaya)
             obj_area = float((diff_map > OBJECT_PIXEL_DELTA).mean())  # fraksi piksel berubah TAJAM
+            self.last_roi, self.last_diff = roi, diff_map
             _m = cv2.absdiff(vis, prev_roi)
             move     = float((_m.max(axis=2) if _m.ndim == 3 else _m).mean())  # gerak antar-frame
             prev_roi = vis
 
+            # --- GERBANG STM32 ---
+            # Pemilahan tidak boleh jalan sebelum STM32 terbukti hidup. Kalau
+            # kamera memilah duluan, hasilnya: klasifikasi benar, perintah ditulis
+            # ke port, "[Serial] Kirim ke STM32" tampil sukses — tapi tidak ada
+            # yang bergerak, karena board belum siap. Objeknya sudah telanjur
+            # dianggap selesai dan tidak akan diproses ulang.
+            # Bukti hidup = ada paket masuk, bukan serial_stm32 "connected"
+            # (port kebuka di OS tetap "connected" walau board diam).
+            umur_stm = umur_data_stm32()
+            stm32_siap = (not TUNGGU_STM32) or (umur_stm < STM32_SIAP_SEC)
+            # inf tidak valid di JSON → None = "belum pernah ada data sama sekali"
+            umur_stm_json = None if umur_stm == float("inf") else round(umur_stm, 1)
+
             self.debug = {
+                "stm32_siap": stm32_siap,
+                "stm32_umur_data": umur_stm_json,
                 "armed": armed,                       # False = lagi nunggu platform kosong
                 "obj_diff": round(obj_diff, 1),       # vs ambang OBJECT_DIFF
                 "obj_area_pct": round(obj_area * 100, 2),   # vs OBJECT_AREA_MIN / CLEAR_AREA
@@ -1002,6 +1114,10 @@ class CameraWorker:
                 "objek_ke": n_obj,
                 # Kesimpulan siap-pakai: kenapa frame ini tidak nge-trigger.
                 "kenapa": (
+                    ("nunggu STM32 siap (belum pernah ada data masuk)"
+                     if umur_stm_json is None else
+                     f"nunggu STM32 siap (data terakhir {umur_stm:.0f}s lalu)")
+                    if not stm32_siap else
                     "lagi nunggu platform kosong (armed=False)" if not armed else
                     f"obj_diff {obj_diff:.1f} <= OBJECT_DIFF {OBJECT_DIFF:.1f}"
                     if obj_diff <= OBJECT_DIFF else
@@ -1013,7 +1129,20 @@ class CameraWorker:
                 ),
             }
 
-            if armed:
+            if not stm32_siap:
+                # Baseline tetap digeser pelan biar tidak basi selama nunggu, tapi
+                # TIDAK ada deteksi/aktuasi sampai STM32 kasih kabar hidup.
+                if BASELINE_ALPHA > 0 and obj_area < CLEAR_AREA:
+                    cv2.accumulateWeighted(grayf, baseline, BASELINE_ALPHA)
+                detecting = False
+                still = 0
+                if time.time() >= idle_log_at:
+                    kabar = ("belum pernah ada data masuk sama sekali"
+                             if umur_stm_json is None else
+                             f"data terakhir {umur_stm:.0f}s lalu (batas {STM32_SIAP_SEC:.0f}s)")
+                    print(f"[CAM] ⏸ nunggu STM32 siap — {kabar}. Pemilahan ditahan.")
+                    idle_log_at = time.time() + IDLE_LOG_SEC
+            elif armed:
                 # Objek nutupin platform (beda dari kosong) DAN sudah diam beberapa frame.
                 if obj_diff > OBJECT_DIFF and obj_area > OBJECT_AREA_MIN and move < STILL_MOVE:
                     if not detecting:
@@ -1265,7 +1394,6 @@ def _register_remote_actions():
             "camera_error": camera_worker.error,
             "last_detection": camera_worker.last,
             "serial_stm32": "connected" if (arduino and arduino.is_open) else "disconnected",
-            "serial_lora":  "connected" if (lora_tx and lora_tx.is_open) else "disconnected",
             "sensor_data":  "ada" if sensor_ok else "belum ada",
             "last_seq":     _seq_counter,
         }
@@ -1281,10 +1409,12 @@ async def lifespan(app: FastAPI):
     _register_remote_actions()
     remote.start()      # tee stdout + thread state/log — sebelum init_mqtt biar log startup ketangkep
 
-    init_all_serial()   # <-- SATU-SATUNYA tempat buka serial STM32 & LoRa
+    init_all_serial()   # <-- SATU-SATUNYA tempat buka serial STM32
     init_mqtt()
     init_http_compare() # <-- jalur HTTP perbandingan (kalau COMPARE_HTTP=1)
     start_dispatcher()  # <-- SATU-SATUNYA thread pembaca serial
+    if SERIAL_WATCHDOG:
+        threading.Thread(target=_watchdog_loop, daemon=True, name="serial-watchdog").start()
 
     if AUTO_START_CAM:
         if camera_worker.start():
@@ -1296,7 +1426,7 @@ async def lifespan(app: FastAPI):
         threading.Thread(target=_camera_push_loop, daemon=True).start()
         print(f"[CAM] Push frame monitor aktif → {BACKEND_HTTP_URL}/camera/frame tiap {CAMERA_PUSH_SEC}s")
 
-    print("[+] Startup selesai: STM32, LoRa, MQTT, Dispatcher semua aktif.")
+    print("[+] Startup selesai: STM32, MQTT, Dispatcher semua aktif.")
     yield
 
     _is_running = False
@@ -1347,13 +1477,23 @@ def status():
         "input_size": f"{IN_W}x{IN_H}", "classes": CLASS_NAMES,
         "gemini": "ready" if gemini_client else "unavailable",
         "serial_stm32": "connected" if (arduino and arduino.is_open) else "disconnected",
-        "serial_lora": "connected" if (lora_tx and lora_tx.is_open) else "disconnected",
         "mqtt": "connected" if mqtt_connected else "disconnected",
         "sensor_data": "ada" if sensor_ok else "belum ada",
+        # Umur data = satu-satunya bukti board BENERAN hidup. serial_stm32
+        # "connected" cuma berarti port kebuka di OS; board hang tetap "connected".
+        "stm32": {
+            "umur_data_detik": (None if umur_data_stm32() == float("inf")
+                                else round(umur_data_stm32(), 1)),
+            "belum_pernah_ada_data": umur_data_stm32() == float("inf"),
+            "sepi_detik": round(sepi_stm32(), 1),
+            "hidup": umur_data_stm32() < SERIAL_QUIET_SEC,
+            "watchdog": SERIAL_WATCHDOG,
+            "ambang_sepi_detik": SERIAL_QUIET_SEC,
+            "jumlah_reset": _wd_resets,
+        },
         "camera": "running" if camera_worker.running else "stopped",
         "forward": {
             "mqtt": FORWARD_MQTT,
-            "lora": FORWARD_LORA,
             "http_compare": COMPARE_HTTP and (_http_q is not None),
         },
         "last_seq": _seq_counter,
@@ -1396,6 +1536,45 @@ def camera_status():
         "error": camera_worker.error,
     }
 
+@app.get("/camera/snapshot")
+def camera_snapshot(mask: int = 1):
+    """Foto ROI terakhir + tandai piksel yang dianggap BERUBAH (merah).
+
+    Ada buat menjawab satu pertanyaan yang selama ini cuma bisa ditebak dari
+    angka: kalau status bilang "platform belum kosong" padahal kelihatan kosong,
+    yang dianggap objek itu SEBENARNYA apa? Kalau merahnya nempel di satu benda
+    → memang ada yang nyangkut. Kalau merahnya nyebar rata seluruh ROI → itu
+    pergeseran cahaya/baseline, bukan benda.
+
+    ?mask=0 buat foto polos tanpa tanda merah.
+    """
+    roi, dm = camera_worker.last_roi, camera_worker.last_diff
+    if roi is None or dm is None:
+        return {"status": "kosong", "message": "Kamera belum jalan / belum ada frame"}
+
+    img = roi.copy()
+    if mask:
+        # Merah = piksel yang lewat ambang OBJECT_PIXEL_DELTA, yaitu persis
+        # piksel yang dihitung jadi obj_area.
+        kena = (dm > OBJECT_PIXEL_DELTA)
+        img[kena] = (0.4 * img[kena] + 0.6 * np.array([0, 0, 255])).astype(img.dtype)
+
+    d = camera_worker.debug or {}
+    baris = [
+        f"diff {d.get('obj_diff')} (ambang {OBJECT_DIFF:.0f})",
+        f"area {d.get('obj_area_pct')}% (ambang {OBJECT_AREA_MIN*100:.0f}%)",
+        f"armed {d.get('armed')}  stm32 {d.get('stm32_siap')}",
+    ]
+    for i, t in enumerate(baris):
+        y = 18 + i * 20
+        cv2.putText(img, t, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
+        cv2.putText(img, t, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    ok, buf = cv2.imencode(".jpg", img)
+    if not ok:
+        return {"status": "error", "message": "Gagal encode JPEG"}
+    return Response(content=buf.tobytes(), media_type="image/jpeg")
+
 @app.get("/")
 def home():
     if os.path.exists(os.path.join(FRONTEND_DIR, "index.html")):
@@ -1421,9 +1600,9 @@ async def predict(file: UploadFile = File(...)):
 @app.post("/arduino/")
 async def arduino_manual(req: ArduinoReq):
     cmd = req.perintah.strip()
-    if cmd not in {"organik", "anorganik", "B3", "reset"}:
-        return {"status": "error", "message": "Perintah tidak valid"}
-    hasil = kirim_ke_stm32(cmd) if cmd in ARDUINO_CMD.values() else {"ok": publish_cmd(cmd), "channel": "mqtt", "cmd": cmd}
+    if cmd not in STM32_CMD_VALID:
+        return {"status": "error", "message": f"Perintah tidak valid. Pilih: {sorted(STM32_CMD_VALID)}"}
+    hasil = kirim_ke_stm32(cmd)
     return {"status": "success" if hasil["ok"] else "error", **hasil}
 
 @app.get("/sensor/latest")
