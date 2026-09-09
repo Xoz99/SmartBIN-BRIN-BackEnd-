@@ -117,8 +117,14 @@ NODE_ID      = os.environ.get("NODE_ID", "bin-003")
 # Bikin start/stop kamera + baca status + tail log bisa dari luar NAT tanpa VPN.
 remote = RemoteControl(NODE_ID)
 
-# --- Jalur forward yang aktif (bisa dimatiin lewat env) ---
-FORWARD_MQTT = os.environ.get("FORWARD_MQTT", "1") == "1"
+# --- Jalur forward telemetri sensor ---
+# Telemetri sensor SELALU dikirim ke MQTT (→ backend VPS). Saklar FORWARD_MQTT
+# sudah dibuang 2026-09-09. Dulu dia dipakai buat eksperimen banding LoRa vs HTTP,
+# dan LoRa sendiri sudah dicabut 2026-09-03 — jadi saklar itu tinggal jadi jebakan:
+# `FORWARD_MQTT=0` yang ketinggalan di .env bikin SELURUH telemetri sensor (isi bin,
+# baterai, berat, GPS) hilang diam-diam tanpa satu pun pesan error, sementara laporan
+# klasifikasi tetap jalan lewat jalur lain — jadi sekilas kelihatan normal.
+# Kalau perlu dimatikan lagi, matikan di sisi backend/broker, jangan di sini.
 
 # Log sensor ringkas: cetak tiap N bacaan (1=tiap bacaan, 5=lebih sepi). Kurangi spam.
 LOG_SENSOR_EVERY = int(os.environ.get("LOG_SENSOR_EVERY", "1"))
@@ -359,8 +365,8 @@ def _serial_dispatcher_loop():
                 with sensor_lock:
                     latest_sensor = {**data, "_topic": TOPIC_SENSOR, "_timestamp": time.time()}
 
-                # 2. Forward ke MQTT
-                if FORWARD_MQTT and _mqtt_client is not None and mqtt_connected:
+                # 2. Forward ke MQTT (→ backend VPS)
+                if _mqtt_client is not None and mqtt_connected:
                     _mqtt_client.publish(TOPIC_SENSOR, fwd)
 
                 # 3. Forward ke HTTP langsung ke server (transport=http) — non-blocking.
@@ -1382,8 +1388,10 @@ def _register_remote_actions():
         cmd = str(args.get("cmd", "")).strip()
         if cmd not in {"organik", "anorganik", "B3", "reset"}:
             raise ValueError(f"Perintah tidak valid: {cmd!r}")
-        if cmd == "reset":
-            return {"ok": publish_cmd(cmd), "channel": "mqtt", "cmd": cmd}
+        # "reset" dulu dilempar ke publish_cmd (MQTT topik smartbin/*/cmd) yang
+        # TIDAK ADA subscriber-nya di sisi STM32 — jadi selalu lapor ok:true tapi
+        # mekaniknya diam. Sekarang semua perintah lewat serial; kirim_ke_stm32
+        # sendiri yang jatuh ke MQTT hanya kalau serial benar-benar mati.
         return kirim_ke_stm32(cmd)
 
     def _snapshot():
@@ -1427,6 +1435,11 @@ async def lifespan(app: FastAPI):
         print(f"[CAM] Push frame monitor aktif → {BACKEND_HTTP_URL}/camera/frame tiap {CAMERA_PUSH_SEC}s")
 
     print("[+] Startup selesai: STM32, MQTT, Dispatcher semua aktif.")
+    # Dicetak eksplisit supaya ketahuan ke mana data pergi tanpa perlu buka /status.
+    print(f"[+] Telemetri sensor → MQTT {MQTT_HOST}:{MQTT_PORT} topik {TOPIC_SENSOR}")
+    print(f"[+] Hasil klasifikasi → topik {TOPIC_CLASSIFICATION}")
+    if COMPARE_HTTP:
+        print(f"[+] Jalur HTTP tambahan aktif → {BACKEND_HTTP_URL}")
     yield
 
     _is_running = False
@@ -1493,7 +1506,7 @@ def status():
         },
         "camera": "running" if camera_worker.running else "stopped",
         "forward": {
-            "mqtt": FORWARD_MQTT,
+            "mqtt": True,   # telemetri sensor selalu dikirim ke MQTT
             "http_compare": COMPARE_HTTP and (_http_q is not None),
         },
         "last_seq": _seq_counter,

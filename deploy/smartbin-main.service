@@ -11,20 +11,26 @@ WorkingDirectory=/home/brin/backend
 ExecStart=/usr/bin/python3 -u main.py
 # Selalu restart — ini yang bikin tombol "Nyalakan Smartbin" (action "run")
 # beneran menghidupkan ulang main.py: remote_control keluar (os._exit), systemd
-# langsung menyalakan proses baru, kamera auto-start (AUTO_START_CAM=1).
+# langsung menyalakan proses baru. Kameranya sendiri ikut AUTO_START_CAM di
+# ~/backend/.env (default 0 = tetap diam sampai disuruh dari aplikasi).
 Restart=always
 RestartSec=3
 Environment=NODE_ID=bin-003
 Environment=REMOTE_CONTROL=1
 Environment=PYTHONUNBUFFERED=1
-# Kamera TIDAK ikut nyala waktu proses start — smartbin diam sampai admin menekan
-# "Nyalakan Smartbin" di aplikasi (action camera_start). Ini yang bikin penyortiran
-# berjalan atas perintah, bukan otomatis.
+# AUTO_START_CAM SENGAJA TIDAK diset di sini — diatur di ~/backend/.env supaya
+# satu sumber, dan kelakuannya sama waktu `python3 main.py` manual maupun lewat
+# systemd. python-dotenv TIDAK menimpa env yang sudah ada, jadi begitu unit ini
+# menyetel Environment=AUTO_START_CAM=..., nilai di .env langsung jadi mubazir
+# dan bikin bingung (persis kejadian 2026-09-09).
+#
+# Nilai yang dipakai: AUTO_START_CAM=0 — kamera TIDAK ikut nyala waktu proses
+# start. Smartbin diam sampai admin menekan "Nyalakan Smartbin" di aplikasi
+# (action camera_start), jadi penyortiran berjalan atas perintah, bukan otomatis.
 #
 # Proses main.py sendiri tetap dibiarkan hidup terus, karena listener MQTT ada DI
 # DALAMNYA: kalau prosesnya mati, tidak ada yang menerima perintah dari aplikasi
 # dan Pi cuma bisa dibangunkan lewat SSH.
-Environment=AUTO_START_CAM=0
 
 [Install]
 WantedBy=multi-user.target
