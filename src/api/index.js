@@ -35,10 +35,19 @@ export function createApp() {
     // ─── Global Middleware ────────────────────────────────────────────────────
     app.use(helmet());
 
+    // CORS_ORIGIN boleh diisi BEBERAPA alamat, dipisah koma. Contoh:
+    //   CORS_ORIGIN=https://brin-trash.vercel.app,http://localhost:5173
+    // Dulu nilainya dipakai apa adanya sebagai satu string, jadi begitu FE dibuka
+    // dari alamat lain (deployment Vercel yang beda, URL preview, atau localhost
+    // waktu development) browser memblokir responsnya dan FE cuma bisa bilang
+    // "tidak bisa terhubung ke server" — padahal backend sehat dan balas 200.
+    const allowedOrigins = (env.CORS_ORIGIN || 'http://localhost:3000')
+        .split(',')
+        .map((o) => o.trim())
+        .filter(Boolean);
+
     app.use(cors({
-        origin: env.NODE_ENV === 'production'
-            ? (env.CORS_ORIGIN || 'http://localhost:3000')
-            : '*',
+        origin: env.NODE_ENV === 'production' ? allowedOrigins : '*',
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
         allowedHeaders: ['Content-Type', 'Authorization'],
     }));

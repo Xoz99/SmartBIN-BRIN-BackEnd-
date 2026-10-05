@@ -161,7 +161,7 @@ def _shutdown():
         print("[+] Serial ditutup.")
 
 # ================= GEMINI SETUP =================
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyAMwyORIARVCBAboc6GvCI1uI0W5XD7Kxw")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 gemini_client  = None
 tips_cache: dict[str, str] = {}
 

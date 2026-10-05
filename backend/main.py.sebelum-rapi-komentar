@@ -52,32 +52,41 @@ else:
 # ========================================================
 # CONFIG
 # ========================================================
-# Model dasar: dipakai sendirian bila ENSEMBLE=0, atau sebagai penjaga B3 bila
-# ensemble aktif. Dapat ditukar lewat env MODEL_PATH tanpa mengubah kode.
+# Model DASAR: dipakai sendirian kalau ENSEMBLE=0, atau sebagai PENJAGA B3 kalau
+# ensemble aktif. Bisa ditukar lewat env tanpa ubah kode (samain dgn MODEL_PATH_NEW),
+# mis. MODEL_PATH=model_ai_baru/model_advanced.tflite. Path relatif dicari juga di
+# folder atas lewat _find_model().
 MODEL_PATH   = os.getenv("MODEL_PATH", "model_combo.tflite")
 FRONTEND_DIR = "../frontend"
 CLASS_NAMES  = ["Anorganik", "B3", "Organik"]
 
 # --- Ensemble klasifikasi ---
-# Model primary lebih akurat untuk Anorganik/Organik; model guard dipakai sebagai
-# penjaga B3 — bila guard memilih B3 di atas B3_GATE, hasil akhir dipaksa B3.
-# Ensemble hanya aktif bila kedua file model ditemukan; jika tidak, sistem jatuh
-# ke model tunggal.
+# Model BARU (primary) jadi utama (lebih akurat anorganik/organik: model_ai_baru/an_or32.tflite),
+# model LAMA (guard) jadi "penjaga B3" (model_combo.tflite): kalau guard nge-vote
+# B3 >= B3_GATE, hasil akhir dipaksa B3. Ini nutupin kelemahan primary yg sering
+# meleset di B3. Kombinasi ini sudah divalidasi manual lewat sim_platform.py
+# (--ensemble --ens-primary rpp32 --ens-guard baru3) sebelum dipindah ke sini.
+# Aktif hanya kalau file model baru ketemu; kalau tidak, jatuh ke model tunggal
+# (perilaku lama) — jadi aman kalau di Raspi file barunya belum dicopy.
 ENSEMBLE       = os.getenv("ENSEMBLE", "1") not in ("0", "false", "False", "")
 MODEL_PATH_NEW = os.getenv("MODEL_PATH_NEW", "model_ai_baru/an_or32.tflite")
 B3_GATE        = float(os.getenv("B3_GATE", "0.55"))
-# Dua syarat tambahan agar guard yang keliru namun yakin tidak langsung lolos:
-# B3_MARGIN menuntut B3 unggul telak atas kelas kedua di guard, B3_PRIMARY_FLOOR
-# menuntut model utama ikut menyetujui B3 minimal sebesar nilai ini. Set 0 untuk
-# menonaktifkan masing-masing.
+# Dua syarat tambahan, diport dari sim_platform.py setelah kasus "daun ke-vote B3":
+# gate doang cuma ngukur si guard sendiri, jadi guard yg PD salah (prob B3 93-96%
+# buat daun) lolos gampang. B3_MARGIN maksa B3 menang telak dari kelas kedua di
+# guard; B3_PRIMARY_FLOOR minta suara kedua — model utama harus setuju minimal
+# segini di B3. Set 0 buat matiin masing-masing (balik ke perilaku gate-doang).
 B3_MARGIN        = float(os.getenv("B3_MARGIN", "0.15"))
 B3_PRIMARY_FLOOR = float(os.getenv("B3_PRIMARY_FLOOR", "0.15"))
 # Cara dua model digabung:
-#   "guard"     — argmax model utama; penjaga hanya boleh memaksa jadi B3.
-#                 Pendapat penjaga soal Organik vs Anorganik diabaikan.
+#   "guard"     — argmax model utama; penjaga cuma boleh MEMAKSA jadi B3 (default,
+#                 perilaku lama). Kelemahannya: pendapat penjaga soal Organik vs
+#                 Anorganik DIBUANG, walaupun sering dia yang benar. Contoh nyata:
+#                 lakban -> utama bilang Organik 53%, penjaga Anorganik 99.9%, yang
+#                 dipakai malah yang salah.
 #   "avg"       — rata-rata tertimbang probabilitas kedua model, lalu argmax.
-#                 Penjaga B3 tetap berlaku di atasnya.
-#   "confident" — ikut model dengan probabilitas tertinggi lebih besar.
+#                 Penjaga B3 tetap jalan di atasnya.
+#   "confident" — ikut model yang probabilitas tertingginya lebih besar.
 ENSEMBLE_MODE = os.getenv("ENSEMBLE_MODE", "guard").strip().lower()
 GUARD_WEIGHT  = float(os.getenv("GUARD_WEIGHT", "0.5"))   # bobot penjaga di mode "avg"
 # Voting antar-frame: ambil beberapa frame lalu rata-ratain probabilitasnya biar
@@ -87,12 +96,16 @@ VOTE_FRAMES    = max(1, int(os.getenv("VOTE_FRAMES", "5")))
 VOTE_DELAY     = float(os.getenv("VOTE_DELAY", "0.03"))   # jeda antar-frame (detik)
 
 # --- SERIAL PORTS: STM32 & LoRa ---
-# Port dideteksi dari deskripsi/VID USB agar tidak tertukar saat nomor ttyACM*
-# bergeser tiap reboot. Override lewat env STM32_PORT / LORA_PORT bila meleset.
+# AUTO-DETEKSI dari deskripsi/VID USB supaya tidak salah port waktu nomor ttyACM*
+# geser tiap reboot — dulu ini penyebab "perintah aktuator nyasar ke LoRa".
 #   STM32  = STMicroelectronics / Virtual COM / VID 0483
 #   LoRa32 = CH340 / QinHeng / VID 1a86 (atau CP210x / Silicon Labs)
-# LoRa adalah jalur alternatif: paket yang sama diteruskan lewat radio 923 MHz
-# ke board RX → gateway. Tanpa modul, sistem tetap jalan lewat Internet/MQTT.
+# Override paksa lewat env STM32_PORT / LORA_PORT kalau deteksi meleset.
+#
+# Modul LoRa adalah jalur komunikasi ALTERNATIF: paket sensor yang sama juga
+# diteruskan lewat radio 923 MHz ke board RX → gateway (lihat rpi-gateway/).
+# Kalau modulnya tidak terpasang, bagian ini cukup mencatat kegagalan membuka
+# port dan sistem tetap jalan penuh lewat jalur Internet/MQTT.
 STM32_PORT = os.environ.get("STM32_PORT")   # None → auto-detect
 LORA_PORT  = os.environ.get("LORA_PORT")    # None → auto-detect
 BAUD_RATE  = int(os.environ.get("BAUD_RATE", "115200"))
@@ -114,9 +127,13 @@ remote = RemoteControl(NODE_ID)
 # FORWARD_LORA=0 mematikan pengiriman lewat radio tanpa menyentuh kode (dipakai
 # saat modul LoRa dicabut, mis. untuk menghemat daya pada purwarupa).
 FORWARD_LORA = os.environ.get("FORWARD_LORA", "1") == "1"
-# Telemetri sensor selalu dikirim ke MQTT. Saklar untuk mematikannya sengaja
-# dihilangkan: nilai 0 yang tertinggal di .env membuat seluruh telemetri hilang
-# tanpa pesan error, sementara laporan klasifikasi tetap jalan.
+# Telemetri sensor SELALU dikirim ke MQTT (→ backend VPS). Saklar FORWARD_MQTT
+# sudah dibuang 2026-09-09. Dulu dia dipakai buat eksperimen banding LoRa vs HTTP,
+# dan LoRa sendiri sudah dicabut 2026-09-03 — jadi saklar itu tinggal jadi jebakan:
+# `FORWARD_MQTT=0` yang ketinggalan di .env bikin SELURUH telemetri sensor (isi bin,
+# baterai, berat, GPS) hilang diam-diam tanpa satu pun pesan error, sementara laporan
+# klasifikasi tetap jalan lewat jalur lain — jadi sekilas kelihatan normal.
+# Kalau perlu dimatikan lagi, matikan di sisi backend/broker, jangan di sini.
 
 # Log sensor ringkas: cetak tiap N bacaan (1=tiap bacaan, 5=lebih sepi). Kurangi spam.
 LOG_SENSOR_EVERY = int(os.environ.get("LOG_SENSOR_EVERY", "1"))
@@ -136,9 +153,11 @@ def _sensor_summary(d: dict) -> str:
         return ""
 
 # --- Jalur HTTP langsung ke server (opsional) ---
-# COMPARE_HTTP=1 → tiap bacaan STM32 juga di-POST langsung ke server
-# (transport=http), selain lewat MQTT. seq dan sentAt disuntikkan agar backend
-# dapat menghitung packet loss dan latency.
+# COMPARE_HTTP=1 → tiap bacaan STM32 JUGA di-POST langsung ke server
+# (transport=http), selain lewat MQTT. seq+sentAt disuntik ke tiap bacaan supaya
+# backend bisa hitung packet loss (dari seq) & latency (createdAt−sentAt).
+# Dulu jalur ini dipakai buat membandingkan LoRa vs HTTP; LoRa sudah dicabut
+# 2026-09-03, jadi sekarang tinggal jalur pembanding MQTT.
 COMPARE_HTTP      = os.environ.get("COMPARE_HTTP", "0") == "1"
 BACKEND_HTTP_URL  = os.environ.get("BACKEND_HTTP_URL", "http://192.168.1.23:3000").rstrip("/")
 DEVICE_INGEST_KEY = os.environ.get("DEVICE_INGEST_KEY", "")
@@ -196,8 +215,10 @@ def init_all_serial():
 
     auto_stm, auto_lora = _detect_ports()
     stm_port  = STM32_PORT or auto_stm or "/dev/ttyACM0"
-    # Tanpa default tebakan: cadangan "/dev/ttyACM0" adalah port STM32 sendiri,
-    # sehingga JSON sensor bisa tertulis ke sana dan dibaca sebagai perintah.
+    # SENGAJA tanpa default tebakan untuk LoRa. Versi lama memakai "/dev/ttyACM0"
+    # sebagai cadangan — padahal itu port STM32 sendiri, sehingga kalau deteksi
+    # meleset main.py membuka port STM32 sebagai LoRa lalu menulis JSON sensor ke
+    # sana, dan firmware memperlakukan tiap baris sebagai perintah aktuator.
     lora_port = LORA_PORT or auto_lora
     _stm32_port = stm_port   # disimpan supaya watchdog bisa buka ulang port yang sama
     print(f"[Serial] Deteksi USB → STM32={auto_stm or '-'} LoRa={auto_lora or '-'} | "
@@ -240,20 +261,36 @@ def close_all_serial():
 # ========================================================
 # WATCHDOG SERIAL — pulihin STM32 yang hang tanpa dicabut-colok manual
 # ========================================================
-# Board yang berhenti merespons tidak terdeteksi dari status port: USB CDC tetap
-# "connected" di level OS dan arduino.write() tetap sukses walau tidak ada yang
-# membacanya. Satu-satunya bukti hidup adalah paket yang benar-benar masuk.
-# Kalau sepi lebih dari SERIAL_QUIET_SEC, port ditutup lalu dibuka ulang.
+# Masalah nyata 2026-09-02: STM32 berhenti total di tengah jalan. Kamera dan
+# klasifikasi tetap mulus, tapi TIDAK ADA aktuasi sama sekali — dan tidak ada
+# tanda apa pun: /status tetap bilang serial_stm32 "connected", karena itu cuma
+# mengecek port kebuka di level OS. Board yang hang tetap tampil "connected".
+# arduino.write() juga tetap "sukses" (byte cuma masuk buffer OS).
+#
+# Yang membangunkan board waktu itu: MEMBUKA ULANG portnya. Membuka port USB CDC
+# menegaskan DTR, dan itu me-reset STM32 — ketahuan karena tiap kali skrip tes
+# dijalankan (buka port sendiri) mekaniknya langsung nurut lagi.
+#
+# Jadi watchdog ini meniru hal itu: kalau tidak ada satu pun data masuk selama
+# SERIAL_QUIET_SEC, tutup lalu buka lagi portnya. Board reboot, telemetri jalan
+# lagi, pemilahan lanjut — tanpa ada yang perlu menyentuh perangkat.
+#
+# CATATAN JUJUR: ini menambal GEJALA. Penyebab hang-nya ada di firmware STM32
+# yang source-nya tidak ada di repo ini, jadi tidak bisa diperbaiki dari sini.
 SERIAL_WATCHDOG  = os.environ.get("SERIAL_WATCHDOG", "1") not in ("0", "false", "False", "")
 SERIAL_QUIET_SEC = float(os.environ.get("SERIAL_QUIET_SEC", "30"))   # sepi selama ini = dianggap hang
 SERIAL_RESET_GAP = float(os.environ.get("SERIAL_RESET_GAP", "25"))   # jeda minimal antar reset
 
 
 def umur_data_stm32() -> float:
-    """Detik sejak paket TERAKHIR dari STM32; inf kalau belum pernah ada paket.
+    """Detik sejak paket TERAKHIR dari STM32, atau inf kalau BELUM PERNAH ada
+    satu paket pun sejak proses ini hidup.
 
-    Sengaja inf, bukan dihitung sejak port dibuka — port yang terbuka bukan
-    bukti board mengirim data (USB CDC tetap enumerate walau firmware diam)."""
+    Sengaja inf, bukan 'dihitung sejak port dibuka'. Port kebuka BUKAN bukti
+    board ngirim data: 2026-09-03 /dev/ttyACM0 muncul normal dan bisa dibuka,
+    tapi firmware-nya diam total (0 baris dalam 45 detik, dan 3 perintah gerak
+    tidak dibalas maupun dieksekusi). Patokan lama bikin gerbang lapor
+    'stm32_siap: true' selama 90 detik pertama padahal board-nya mati."""
     with sensor_lock:
         ts = (latest_sensor or {}).get("_timestamp")
     return float("inf") if ts is None else time.time() - ts
@@ -485,8 +522,14 @@ def init_mqtt():
     # nyangkut "online" selamanya saat Pi mati mendadak.
     remote.attach(client)
 
-    # Pakai connect_async supaya paho menangani koneksi dan reconnect di thread
-    # sendiri. connect() biasa melempar exception saat TLS timeout, tanpa retry.
+    # connect_async + loop_start: koneksi dikerjakan DI THREAD paho, termasuk
+    # COBA ULANG otomatis kalau gagal. Sebelumnya dipakai connect() biasa, yang
+    # MELEMPAR exception saat handshake TLS timeout — dan karena _mqtt_client
+    # tetap None, tidak ada satu pun yang mencoba lagi. Akibatnya (kejadian
+    # 2026-09-09 14:46): satu kali gagal handshake bikin Pi jalan SELAMANYA tanpa
+    # MQTT — remote control mati, telemetri & hasil klasifikasi tidak terkirim —
+    # sementara log tetap bilang "Startup selesai ... semua aktif". Di jaringan
+    # yang lambat/goyang (tethering) ini kejadian terus.
     client.reconnect_delay_set(min_delay=1, max_delay=60)
     try:
         client.connect_async(MQTT_HOST, MQTT_PORT, keepalive=60)
@@ -521,7 +564,11 @@ STM32_CMD_VALID = {"organik", "anorganik", "B3", "reset"}
 def _ke_cmd_stm32(kategori: str):
     """Terima nama kategori ("Anorganik") maupun perintah mentah ("anorganik").
 
-    Keduanya diterima agar endpoint manual tidak gagal hanya karena huruf besar."""
+    Dulu cuma nerima kunci ARDUINO_CMD yang berhuruf besar. Akibatnya endpoint
+    /arduino/ — yang ngirim nilai huruf kecil — SELALU gagal buat organik dan
+    anorganik, lalu diam-diam nyasar ke MQTT dan tetap lapor sukses. Cuma "B3"
+    yang kebetulan lolos karena dia sekaligus kunci dan nilai.
+    """
     k = (kategori or "").strip()
     if k in STM32_CMD_VALID:
         return k
@@ -870,9 +917,11 @@ DATASET_LABEL   = os.environ.get("DATASET_LABEL", "unsorted")
 # kondisi KOSONG (baseline). Cuma analisis kalau ada objek nutupin platform & sudah
 # diam, SEKALI per objek. Nilai = rata-rata beda piksel (0-255). Sesuaikan via env.
 CAMERA_WARMUP_SEC = float(os.environ.get("CAMERA_WARMUP_SEC", "2.0"))  # tunggu kamera settle (auto-exposure) sebelum ambil baseline → cegah false-trigger di awal
-# Pemilahan ditahan sampai ada paket masuk dari STM32. STM32_SIAP_SEC harus di
-# ATAS siklus kirim board (~33 detik); nilai di bawahnya membuat board sehat
-# dianggap mati dan ikut di-reset terus-menerus.
+# Gerbang STM32: pemilahan ditahan sampai board terbukti hidup (ada paket masuk).
+# STM32_SIAP_SEC harus DI ATAS siklus kirim alami board. Diukur 2026-09-02:
+# bin-003 mengirim tiap ~33 detik, sangat konsisten (32,7 / 32,8 / 33,0).
+# Angka di bawah 33 bikin board sehat dianggap mati — itu yang sempat terjadi
+# waktu ambang watchdog diset 30 detik dan board yang normal malah di-reset terus.
 TUNGGU_STM32   = os.environ.get("TUNGGU_STM32", "1") not in ("0", "false", "False", "")
 STM32_SIAP_SEC = float(os.environ.get("STM32_SIAP_SEC", "90"))
 
@@ -929,11 +978,14 @@ REARM_STILL_NEED = int(os.environ.get("REARM_STILL_NEED", "8"))  # frame DIAM be
 # selama nunggu tetap ngeluarin peringatan. 0 = nunggu selamanya (tidak pernah dipaksa).
 REARM_MAX_WAIT   = float(os.environ.get("REARM_MAX_WAIT", "60"))
 REARM_WARN_SEC   = float(os.environ.get("REARM_WARN_SEC", "10"))  # interval peringatan saat nunggu
-# Fase grace setelah mekanik berhenti, sebelum sistem benar-benar armed. Alas
-# sering bergeser sedikit ke posisi istirahat final setelah scene dinyatakan diam,
-# sehingga baseline yang diambil terlalu awal membuat platform kosong terbaca
-# sebagai objek. Selama grace baseline terus disamakan dengan frame sekarang agar
-# pergeseran sisa terserap; penyegaran berhenti bila perubahannya sebesar objek (>= CLEAR_AREA).
+# Fase GRACE setelah mekanik berhenti, sebelum sistem benar-benar armed. Diamati di
+# rig: baseline diambil saat scene sudah diam, lalu alas masih bergeser sedikit ke
+# posisi istirahat final dan BERHENTI STABIL di situ. Scene diam (lolos STILL_NEED
+# berapa pun) tapi beda jauh dari baseline → jepret platform kosong. Tidak ada
+# ambang yang bisa menangkal ini karena masalahnya KAPAN baseline diambil.
+# Selama grace, baseline terus disamakan dengan frame sekarang supaya pergeseran
+# sisa terserap. Objek yang ditaruh saat grace TIDAK ikut terserap: penyegaran
+# baseline berhenti begitu perubahannya sebesar objek (>= CLEAR_AREA).
 REARM_GRACE_SEC  = float(os.environ.get("REARM_GRACE_SEC", "2.0"))
 
 
@@ -1096,9 +1148,13 @@ class CameraWorker:
             prev_roi = vis
 
             # --- GERBANG STM32 ---
-            # Tanpa gerbang ini kamera bisa memilah saat board belum siap:
-            # perintah tertulis ke port dan log tampak sukses, tapi mekanik diam
-            # dan objeknya sudah telanjur dianggap selesai.
+            # Pemilahan tidak boleh jalan sebelum STM32 terbukti hidup. Kalau
+            # kamera memilah duluan, hasilnya: klasifikasi benar, perintah ditulis
+            # ke port, "[Serial] Kirim ke STM32" tampil sukses — tapi tidak ada
+            # yang bergerak, karena board belum siap. Objeknya sudah telanjur
+            # dianggap selesai dan tidak akan diproses ulang.
+            # Bukti hidup = ada paket masuk, bukan serial_stm32 "connected"
+            # (port kebuka di OS tetap "connected" walau board diam).
             umur_stm = umur_data_stm32()
             stm32_siap = (not TUNGGU_STM32) or (umur_stm < STM32_SIAP_SEC)
             # inf tidak valid di JSON → None = "belum pernah ada data sama sekali"
@@ -1235,11 +1291,14 @@ class CameraWorker:
                         print(f"[CAM] … menunggu objek (platform kosong, obj_diff={obj_diff:.0f}, area={obj_area*100:.1f}%)")
                         idle_log_at = time.time() + IDLE_LOG_SEC
             else:
-                # Timer aktuator saja tidak cukup untuk re-arm: ACTUATOR_TIMES hanya
-                # perkiraan, dan mekanik bisa masih bergerak saat timer habis. Baseline
-                # yang diambil saat itu merekam platform miring, sehingga setelah platform
-                # kembali ke posisi rest selisihnya melonjak dan memicu klasifikasi palsu
-                # atas platform kosong. Karena itu: tunggu scene benar-benar DIAM dulu, baru ambil baseline.
+                # Re-arm: timer aktuator habis SAJA tidak cukup. Durasi ACTUATOR_TIMES
+                # cuma perkiraan — mekanik (tilt/servo/auto-reset) bisa MASIH gerak pas
+                # timer bunyi. Kalau baseline diambil saat itu, isinya "platform miring /
+                # objek nyangkut"; begitu platform balik ke posisi rest, obj_diff vs
+                # baseline jelek itu meledak > OBJECT_DIFF padahal buletan KOSONG →
+                # false-trigger → yang diklasifikasi PLATFORM KOSONG, dan platform kosong
+                # selalu jatuh ke kelas yang sama tiap siklus.
+                # Makanya: tunggu scene benar-benar DIAM dulu, baru ambil baseline.
                 if grace_until:
                     # Laraskan baseline ke kondisi sekarang selama grace — kecuali
                     # perubahannya sebesar objek, yang berarti ada yang ditaruh dan
@@ -1260,10 +1319,12 @@ class CameraWorker:
                     # Wajib juga MIRIP kondisi kosong yang lama (obj_diff < CLEAR_DIFF),
                     # jadi baseline tidak pernah keambil pas platform masih miring.
                     diam  = move < STILL_MOVE
-                    # Cukup salah satu sinyal menyatakan bersih. Alas yang berhenti di
-                    # rotasi berbeda memberi area 7-8% dengan obj_diff 8-15, sedangkan
-                    # objek nyata memberi area 54% dengan obj_diff 50. Memakai AND
-                    # membuat kasus pertama tidak pernah lolos.
+                    # CUKUP SALAH SATU sinyal bilang bersih. Diukur dari rig: habis
+                    # aktuasi buletan kosong tapi alas berhenti di rotasi lain →
+                    # area 7-8% (lubang baut pindah) padahal obj_diff cuma 8-15.
+                    # Objek yang benar-benar nangkring: area 54%, obj_diff 50.
+                    # Pakai AND bikin kasus pertama tak pernah lolos → nunggu 60s
+                    # tiap siklus, dan objek yang ditaruh selama itu terabaikan.
                     pulih = obj_area < CLEAR_AREA or obj_diff < CLEAR_DIFF
                     settle = settle + 1 if (diam and pulih) else 0
                     telat = REARM_MAX_WAIT > 0 and time.time() >= rearm_at + REARM_MAX_WAIT
@@ -1381,8 +1442,10 @@ def _register_remote_actions():
         cmd = str(args.get("cmd", "")).strip()
         if cmd not in {"organik", "anorganik", "B3", "reset"}:
             raise ValueError(f"Perintah tidak valid: {cmd!r}")
-        # Semua perintah lewat serial; kirim_ke_stm32 sendiri yang jatuh ke MQTT
-        # hanya jika serial benar-benar tidak tersedia.
+        # "reset" dulu dilempar ke publish_cmd (MQTT topik smartbin/*/cmd) yang
+        # TIDAK ADA subscriber-nya di sisi STM32 — jadi selalu lapor ok:true tapi
+        # mekaniknya diam. Sekarang semua perintah lewat serial; kirim_ke_stm32
+        # sendiri yang jatuh ke MQTT hanya kalau serial benar-benar mati.
         return kirim_ke_stm32(cmd)
 
     def _snapshot():
@@ -1550,11 +1613,16 @@ def camera_status():
 
 @app.get("/camera/snapshot")
 def camera_snapshot(mask: int = 1):
-    """Foto ROI terakhir, dengan piksel yang dianggap berubah ditandai merah.
+    """Foto ROI terakhir + tandai piksel yang dianggap BERUBAH (merah).
 
-    Berguna untuk membedakan objek yang benar-benar menutupi platform (merah
-    terkumpul pada satu benda) dari pergeseran cahaya (merah menyebar rata).
-    ?mask=0 menghasilkan foto polos tanpa penanda."""
+    Ada buat menjawab satu pertanyaan yang selama ini cuma bisa ditebak dari
+    angka: kalau status bilang "platform belum kosong" padahal kelihatan kosong,
+    yang dianggap objek itu SEBENARNYA apa? Kalau merahnya nempel di satu benda
+    → memang ada yang nyangkut. Kalau merahnya nyebar rata seluruh ROI → itu
+    pergeseran cahaya/baseline, bukan benda.
+
+    ?mask=0 buat foto polos tanpa tanda merah.
+    """
     roi, dm = camera_worker.last_roi, camera_worker.last_diff
     if roi is None or dm is None:
         return {"status": "kosong", "message": "Kamera belum jalan / belum ada frame"}
