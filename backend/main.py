@@ -100,10 +100,13 @@ BAUD_RATE  = int(os.environ.get("BAUD_RATE", "115200"))
 # --- Backend SmartBIN (MQTT HiveMQ Cloud) — set per-node lewat env var. ---
 # NODE_ID WAJIB unik tiap Raspberry Pi/bin (mis. bin-001, bin-002, ...).
 # Jalankan misalnya: NODE_ID=bin-005 python3 main.py
-MQTT_HOST    = os.environ.get("MQTT_HOST", "4b1ed76fd60640648c995b6c90f11829.s1.eu.hivemq.cloud")
+# Kredensial broker WAJIB lewat .env — tidak boleh ada nilai bawaan di kode,
+# karena repositori ini publik dan siapa pun yang membacanya bisa menyambung ke
+# broker, membaca telemetri, dan mengirim perintah ke topik device/cmd.
+MQTT_HOST    = os.environ.get("MQTT_HOST", "")
 MQTT_PORT    = int(os.environ.get("MQTT_PORT", "8883"))
-MQTT_USER    = os.environ.get("MQTT_USER", "bintrash")
-MQTT_PASS    = os.environ.get("MQTT_PASS", "Smartbinbrin1")
+MQTT_USER    = os.environ.get("MQTT_USER", "")
+MQTT_PASS    = os.environ.get("MQTT_PASS", "")
 NODE_ID      = os.environ.get("NODE_ID", "bin-003")
 
 # Bridge remote-control lewat MQTT (topik smartbin/{NODE_ID}/device/*).
@@ -487,6 +490,11 @@ def init_mqtt():
 
     # Pakai connect_async supaya paho menangani koneksi dan reconnect di thread
     # sendiri. connect() biasa melempar exception saat TLS timeout, tanpa retry.
+    if not (MQTT_HOST and MQTT_USER and MQTT_PASS):
+        print("[MQTT] MQTT_HOST/MQTT_USER/MQTT_PASS belum diisi di .env — "
+              "MQTT dilewati. Kamera & serial tetap jalan.")
+        return
+
     client.reconnect_delay_set(min_delay=1, max_delay=60)
     try:
         client.connect_async(MQTT_HOST, MQTT_PORT, keepalive=60)

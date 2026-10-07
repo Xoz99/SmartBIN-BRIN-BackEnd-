@@ -71,9 +71,9 @@ Sebelum memulai deployment, pastikan resource berikut telah disiapkan:
 
 1. Login ke **HiveMQ Cloud Dashboard**.
 2. Buat Cluster baru (pilih opsi *Free Tier*).
-3. Catat **Cluster URI / Broker URL**, contoh: `4b1ed76fd60640648c995b6c90f11829.s1.eu.hivemq.cloud`.
+3. Catat **Cluster URI / Broker URL**, contoh: `<cluster-id>.s1.eu.hivemq.cloud`.
 4. Buka tab **Access Management** (Credentials):
-   - Tambahkan User Baru (misal: Username `bintrash`, Password `Smartbinbrin1`).
+   - Tambahkan User Baru (misal: Username `<mqtt-username>`, Password `<mqtt-password>`).
    - Berikan akses Read/Write (*Publish/Subscribe*) ke semua topik.
 5. Port komunikasi yang digunakan adalah **`8883`** (MQTT Secure TLS/SSL).
 
@@ -147,9 +147,9 @@ REDIS_URL="redis://redis:6379"
 # ================================
 # MQTT (HiveMQ Cloud)
 # ================================
-MQTT_BROKER_URL=mqtts://4b1ed76fd60640648c995b6c90f11829.s1.eu.hivemq.cloud:8883
-MQTT_USERNAME=bintrash
-MQTT_PASSWORD=Smartbinbrin1
+MQTT_BROKER_URL=mqtts://<cluster-id>.s1.eu.hivemq.cloud:8883
+MQTT_USERNAME=<mqtt-username>
+MQTT_PASSWORD=<mqtt-password>
 MQTT_CLIENT_ID=
 
 # ================================
@@ -238,7 +238,7 @@ curl -I https://smartbin.sbs/health
    - Output Directory: `.next` atau `dist`
 4. **Environment Variables** (Tambahkan variabel berikut):
    - `NEXT_PUBLIC_API_BASE_URL` = `https://smartbin.sbs`
-   - `NEXT_PUBLIC_MQTT_BROKER_URL` = `wss://4b1ed76fd60640648c995b6c90f11829.s1.eu.hivemq.cloud:8884/mqtt` *(jika frontend membaca MQTT langsung)*
+   - `NEXT_PUBLIC_MQTT_BROKER_URL` = `wss://<cluster-id>.s1.eu.hivemq.cloud:8884/mqtt` *(jika frontend membaca MQTT langsung)*
 5. Klik **Deploy**.
 6. Setelah selesai, atur **Domains** di Setting Vercel ke domain pilihan (misal: `frontend-smartbin-brin.vercel.app` atau `app.smartbin.sbs`).
 
@@ -300,9 +300,9 @@ CLASSIFICATION_INGEST_URL=https://smartbin.sbs/ingest/classifications
 DEVICE_INGEST_KEY=c391ab89201f928e19024a87239102938471209384719284
 
 # HiveMQ Cloud Credentials
-MQTT_BROKER_URL=mqtts://4b1ed76fd60640648c995b6c90f11829.s1.eu.hivemq.cloud:8883
-MQTT_USERNAME=bintrash
-MQTT_PASSWORD=Smartbinbrin1
+MQTT_BROKER_URL=mqtts://<cluster-id>.s1.eu.hivemq.cloud:8883
+MQTT_USERNAME=<mqtt-username>
+MQTT_PASSWORD=<mqtt-password>
 MQTT_CLIENT_ID=smartbin-pemilah-003
 
 # Hardware Serial Ports
@@ -380,10 +380,10 @@ const char* ssid = "NAMA_WIFI_LOKASI";
 const char* password = "PASSWORD_WIFI_LOKASI";
 
 // HiveMQ Cloud Credentials
-const char* mqtt_server = "4b1ed76fd60640648c995b6c90f11829.s1.eu.hivemq.cloud";
+const char* mqtt_server = "<cluster-id>.s1.eu.hivemq.cloud";
 const int mqtt_port = 8883;
-const char* mqtt_user = "bintrash";
-const char* mqtt_pass = "Smartbinbrin1";
+const char* mqtt_user = "<mqtt-username>";
+const char* mqtt_pass = "<mqtt-password>";
 const char* client_id = "ESP32-BIN-NODE-003";
 
 // Topic Publish Telemetri
@@ -433,8 +433,8 @@ journalctl -u smartbin-pemilah.service -f
 | `DATABASE_URL` | VPS Backend | Connection string database PostgreSQL | `postgresql://user:pass@postgres:5432/smartbin_db` |
 | `REDIS_URL` | VPS Backend | Connection string Redis Caching | `redis://redis:6379` |
 | `MQTT_BROKER_URL` | VPS Backend, Raspi, ESP32 | URL Broker HiveMQ Cloud TLS Port 8883 | `mqtts://<cluster>.s1.eu.hivemq.cloud:8883` |
-| `MQTT_USERNAME` | VPS Backend, Raspi, ESP32 | User autentikasi HiveMQ | `bintrash` |
-| `MQTT_PASSWORD` | VPS Backend, Raspi, ESP32 | Password autentikasi HiveMQ | `Smartbinbrin1` |
+| `MQTT_USERNAME` | VPS Backend, Raspi, ESP32 | User autentikasi HiveMQ | `<mqtt-username>` |
+| `MQTT_PASSWORD` | VPS Backend, Raspi, ESP32 | Password autentikasi HiveMQ | `<mqtt-password>` |
 | `JWT_SECRET` | VPS Backend | Secret key penandatanganan token JWT | `openssl rand -hex 64` |
 | `DEVICE_INGEST_KEY` | VPS Backend & Raspi Edge | Key autentikasi HTTP Push dari perangkat Edge | `openssl rand -hex 24` |
 | `CORS_ORIGIN` | VPS Backend | Origin domain Frontend yang diizinkan | `https://frontend-smartbin-brin.vercel.app` |
